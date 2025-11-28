@@ -1,0 +1,30 @@
+[package]
+name = "statcan-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "statcan_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3", "dep:pyo3-polars"]
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "gzip", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+polars = { version = "0.37", features = ["lazy", "csv", "strings", "temporal", "dtype-date", "regex"] }
+zip = "0.6"
+thiserror = "1.0"
+bytes = "1.5"
+futures = "0.3"
+chrono = "0.4"
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"], optional = true }
+pyo3-polars = { version = "0.11", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+chrono = "0.4"
