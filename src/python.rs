@@ -37,6 +37,24 @@ impl PyStatCanClient {
             }
         })
     }
+
+    fn get_all_cubes_list_lite(&self) -> PyResult<String> {
+        self.rt.block_on(async {
+            match self.client.get_all_cubes_list_lite().await {
+                Ok(cubes) => serde_json::to_string(&cubes).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string())),
+                Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+            }
+        })
+    }
+
+    fn get_data_from_cube_pid(&self, pid: &str, coords: Vec<String>) -> PyResult<String> {
+        self.rt.block_on(async {
+            match self.client.get_data_from_cube_pid(pid, coords).await {
+                Ok(data) => serde_json::to_string(&data).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string())),
+                Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+            }
+        })
+    }
 }
 
 #[pymodule]

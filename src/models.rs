@@ -26,7 +26,7 @@ pub struct CubeMetadataResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CubeMetadata {
     pub cube_title_en: String,
-    pub cube_pid: String,
+    pub product_id: String,
     pub dimension: Vec<Dimension>,
 }
 

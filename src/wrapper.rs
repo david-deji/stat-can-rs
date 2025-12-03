@@ -1,6 +1,5 @@
 use polars::prelude::*;
 use crate::StatCanError;
-use chrono::{Datelike, NaiveDate};
 
 pub struct StatCanDataFrame {
     df: DataFrame,
@@ -66,5 +65,55 @@ impl StatCanDataFrame {
         println!("Unique values for '{}':", col_name);
         println!("{:?}", unique.head(Some(20)));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_mock_df() -> DataFrame {
+        df!(
+            "GEO" => &["Canada", "Ontario", "Alberta"],
+            "REF_DATE" => &["2020-01", "2021-06", "2022-12"],
+            "VALUE" => &[100.0, 200.0, 300.0],
+            "Category" => &["A", "B", "A"]
+        ).unwrap()
+    }
+
+    #[test]
+    fn test_filter_geo() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        let filtered = wrapper.filter_geo("Ontario").unwrap();
+        let res = filtered.as_polars();
+        
+        assert_eq!(res.height(), 1);
+        assert_eq!(res.column("GEO").unwrap().get(0).unwrap(), AnyValue::String("Ontario"));
+    }
+
+    #[test]
+    fn test_filter_date_range() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        // 2021 to 2022
+        let filtered = wrapper.filter_date_range(2021, 2022).unwrap();
+        let res = filtered.as_polars();
+        
+        assert_eq!(res.height(), 2); // 2021-06 and 2022-12
+        
+        let dates: Vec<String> = res.column("REF_DATE").unwrap().str().unwrap().into_iter().flatten().map(|s| s.to_string()).collect();
+        assert!(dates.contains(&"2021-06".to_string()));
+        assert!(dates.contains(&"2022-12".to_string()));
+    }
+
+    #[test]
+    fn test_filter_column() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        let filtered = wrapper.filter_column("Category", "A").unwrap();
+        let res = filtered.as_polars();
+        
+        assert_eq!(res.height(), 2); // Canada (A) and Alberta (A)
     }
 }
