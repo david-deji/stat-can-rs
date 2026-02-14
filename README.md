@@ -35,7 +35,20 @@ tokio = { version = "1.0", features = ["full"] }
 polars = { version = "0.36", features = ["lazy", "csv", "strings", "temporal", "dtype-date"] }
 ```
 
+### 3. Agent Registration & API Keys (Optional)
+
+To enable self-service API key registration for Agents:
+
+1.  Set up a **Supabase** project.
+2.  Run the SQL initialization script (see `DEPLOYMENT.md`).
+3.  Set env vars:
+    - `SUPABASE_URL`
+    - `SUPABASE_KEY` (Anon Key)
+
+Agents can then call `POST /register` to get their own API key.
+
 ## Usage
+
 
 ### Basic Metadata Fetching
 

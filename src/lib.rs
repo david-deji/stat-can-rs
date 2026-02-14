@@ -6,7 +6,8 @@ pub mod wrapper;
 pub use wrapper::StatCanDataFrame;
 
 use crate::models::{
-    Cube, CubeListResponse, CubeMetadataResponse, DataResponse, FullTableResponse,
+    Cube, CubeListResponse, CubeMetadataResponse, DataPoint, DataResponse, FullTableResponse,
+    VectorDataResponse,
 };
 use ::zip::ZipArchive;
 use polars::prelude::*;
@@ -76,55 +77,131 @@ impl StatCanClient {
         }
     }
 
-    pub async fn get_data_from_cube_pid(
+    pub async fn get_data_from_coords(
         &self,
         pid: &str,
         coords: Vec<String>,
     ) -> Result<DataResponse> {
-        let url = format!("{}/getDataFromCubePidCoord", BASE_URL);
-        // The API expects: [{"productId": "...", "coordinate": "..."}]
-        // Actually, getDataFromCubePidCoord takes a list of objects.
-        // Wait, the user requirement says "getDataFromCubePid" but mentions "fetch_coordinates".
-        // "getDataFromCubePid" usually fetches everything or a subset?
-        // Let's check the API docs context provided: "getDataFromCubePid: Fetches data for specific coordinates."
-        // The endpoint is likely `getDataFromCubePidCoord` for specific coordinates.
-        // Payload: [{"productId": 123, "coordinate": "1.1.1.1.1"}]
+        let url = format!("{}/getDataFromCubePidCoordAndLatestNPeriods", BASE_URL);
 
         let payload: Vec<_> = coords
-            .iter()
-            .map(|c| {
+            .into_iter() // Changed from .iter() to consume `coords`
+            .map(|c_owned| {
+                let c = c_owned.trim(); // Trim whitespace
+                                        // Pad coordinate to 10 components if needed
+                let parts: Vec<&str> = c.split('.').collect();
+                let mut padded_string = c.to_string(); // Use c.to_string() as c is now &str
+                if parts.len() < 10 {
+                    let needed = 10 - parts.len();
+                    for _ in 0..needed {
+                        padded_string.push_str(".0");
+                    }
+                }
+
+                info!(
+                    "Fetching coord: original='{}', padded='{}'",
+                    c, padded_string
+                );
+
+                let pid_val = if let Ok(n) = pid.parse::<i64>() {
+                    json!(n)
+                } else {
+                    json!(pid)
+                };
+
                 json!({
-                    "productId": pid,
-                    "coordinate": c
+                    "productId": pid_val,
+                    "coordinate": padded_string,
+                    "latestN": 1
                 })
             })
             .collect();
 
         let resp = self.client.post(&url).json(&payload).send().await?;
-        // API returns a list of responses, one per coordinate requested?
-        // Or a single object wrapping them?
-        // Usually StatCan returns `[{"status": "SUCCESS", "object": {...}}]`
-        // But for `getDataFromCubePidCoord` it might return a single list of points if successful?
-        // Let's assume standard wrapper for now, but if it's a bulk fetch, it might be different.
-        // Actually, looking at `DataResponse` struct, it has `object: Option<Vec<DataPoint>>`.
-        // This matches `getDataFromCubePid` (without Coord) which fetches last N periods?
-        // If we use `getDataFromCubePidCoord`, the response is `[{"status":..., "object": ...}]`.
-        // Let's stick to the user's "fetch_coordinates" helper which implies specific coordinates.
 
-        // Let's assume the response is a list of DataResponse, and we merge them or return the first?
-        // If we send multiple coordinates, we get multiple responses.
-        // For simplicity, let's assume we want to aggregate them into one `DataResponse` or just return the raw list?
-        // The user asked for `fetch_coordinates(pid, coords)`.
-        // Let's try to parse as `Vec<DataResponse>` and flatten.
+        if !resp.status().is_success() {
+            return Err(StatCanError::Api(format!(
+                "API Error {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            )));
+        }
 
-        let responses: Vec<DataResponse> = resp.json().await?;
+        let responses: Vec<VectorDataResponse> = resp.json().await?;
 
-        // Flatten the objects
+        // Flatten and map to DataResponse
         let mut all_points = Vec::new();
         for r in responses {
             if r.status == "SUCCESS" {
-                if let Some(points) = r.object {
-                    all_points.extend(points);
+                if let Some(obj) = r.object {
+                    for vp in obj.vector_data_point {
+                        all_points.push(DataPoint {
+                            vector_id: obj.vector_id,
+                            coordinate: obj.coordinate.clone(),
+                            ref_date: vp.ref_per,
+                            value: vp.value,
+                            decimals: vp.decimals,
+                            scalar_factor_code: vp.scalar_factor_code,
+                            symbol_code: vp.symbol_code,
+                            status_code: vp.status_code,
+                            security_level_code: vp.security_level_code,
+                            release_time: vp.release_time,
+                            frequency_code: vp.frequency_code,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(DataResponse {
+            status: "SUCCESS".to_string(),
+            object: Some(all_points),
+        })
+    }
+
+    pub async fn get_data_from_vectors(&self, vectors: Vec<String>) -> Result<DataResponse> {
+        let url = format!("{}/getDataFromVectorsAndLatestNPeriods", BASE_URL);
+        let payload: Vec<_> = vectors
+            .iter()
+            .map(|v| {
+                let v_clean = v.to_lowercase().replace("v", "");
+                // Parse to int if possible, else generic string
+                let id_val = if let Ok(n) = v_clean.parse::<i64>() {
+                    json!(n)
+                } else {
+                    json!(v_clean)
+                };
+
+                json!({
+                    "vectorId": id_val,
+                    "latestN": 1
+                })
+            })
+            .collect();
+
+        let resp = self.client.post(&url).json(&payload).send().await?;
+        let responses: Vec<VectorDataResponse> = resp.json().await?;
+
+        // Flatten and map
+        let mut all_points = Vec::new();
+        for r in responses {
+            if r.status == "SUCCESS" {
+                if let Some(obj) = r.object {
+                    for vp in obj.vector_data_point {
+                        all_points.push(DataPoint {
+                            vector_id: obj.vector_id,
+                            coordinate: obj.coordinate.clone(),
+                            ref_date: vp.ref_per,
+                            value: vp.value,
+                            decimals: vp.decimals,
+                            scalar_factor_code: vp.scalar_factor_code,
+                            symbol_code: vp.symbol_code,
+                            status_code: vp.status_code,
+                            security_level_code: vp.security_level_code,
+                            release_time: vp.release_time,
+                            frequency_code: vp.frequency_code,
+                        });
+                    }
                 }
             }
         }

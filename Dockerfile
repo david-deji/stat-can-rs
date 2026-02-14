@@ -7,19 +7,25 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy src to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/lib.rs && echo "fn main() {}" > src/main.rs
+RUN mkdir -p src/bin && \
+    echo "pub fn dummy() {}" > src/lib.rs && \
+    echo "fn main() {}" > src/bin/mcp_server.rs
 
-# Build dependencies
-# We need pkg-config and openssl-dev for reqwest/native-tls if not using rustls-tls (we are using rustls-tls in cargo.toml)
-# But let's install them just in case specific features need them
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# Build dependencies (release mode)
+# This caches compiled dependencies in the layer
+RUN cargo build --release --lib
+RUN cargo build --release --bin mcp_server
 
-# Copy source code
+# Remove dummy build artifacts so they don't interfere
+RUN rm -f target/release/deps/statcan_rs*
+RUN rm -f target/release/deps/mcp_server*
+
+# Copy actual source code
 COPY src src
 COPY examples examples
 COPY README.md .
 
-# Build the binary
+# Build the binary (only compiles changes in src)
 RUN cargo build --release --bin mcp_server
 
 # Runtime Stage

@@ -89,6 +89,20 @@ class Agent:
             print(colored("❌ Agent: Could not find suitable table.", "red"))
             return
 
+        # Step 2.5: Get Dimensions
+        print(colored(f"🤖 Agent: Fetching dimensions for table {target_pid}...", "green"))
+        res = self.send_request("call_tool", {
+            "name": "get_cube_dimensions",
+            "arguments": {"pid": target_pid}
+        })
+        
+        if "error" in res and res["error"]:
+             print(colored(f"❌ Agent: Error fetching dimensions: {res['error']}", "red"))
+        else:
+             dims_str = res['result']['content'][0]['text']
+             dims = json.loads(dims_str)
+             print(colored(f"🤖 Agent: Found {len(dims)} dimensions. Keys: {list(dims.keys())}", "green"))
+
         # Step 3: Fetch
         print(colored(f"🤖 Agent: Fetching last 12 months of data for British Columbia from table {target_pid}...", "green"))
         res = self.send_request("call_tool", {
@@ -113,31 +127,70 @@ class Agent:
             
         print(colored(f"🤖 Agent: Received {len(data)} rows of data.", "green"))
         
-        # Step 4: Analyze
+        # Step 4: Analyze and Verify New Tools
         # Find "All-items" category usually. Or just list what we have.
-        # The data structure depends on the CSV columns. usually "Products and product groups"
         
         latest_date = ""
         latest_val = 0.0
+        sample_vector = None
+        sample_coord = None
         
-        # Filter for "All-items" if possible, or just print the first entry for inspection
+        # Filter for "All-items" if possible
         input_data = [row for row in data if "All-items" in row.get("Products and product groups", "")]
         
-        if input_data:
-            latest_row = input_data[0] # Sorted by date desc already
-            latest_date = latest_row.get("REF_DATE")
-            latest_val = latest_row.get("VALUE")
-            print(colored(f"🔍 Agent Analysis: Found 'All-items' CPI for {latest_date}: {latest_val}", "yellow"))
-        else:
-            # Fallback
-            if data:
-                latest_row = data[0]
-                latest_date = latest_row.get("REF_DATE")
-                latest_val = latest_row.get("VALUE")
-                prod = latest_row.get("Products and product groups", "Unknown")
-                print(colored(f"🔍 Agent Analysis: Found '{prod}' CPI for {latest_date}: {latest_val}", "yellow"))
+        target_row = input_data[0] if input_data else (data[0] if data else None)
 
-        # Step 5: Report
+        if target_row:
+            latest_date = target_row.get("REF_DATE")
+            latest_val = target_row.get("VALUE")
+            prod = target_row.get("Products and product groups", "Unknown")
+            sample_vector = target_row.get("VECTOR")
+            sample_coord = target_row.get("COORDINATE")
+            
+            print(colored(f"🔍 Agent Analysis: Found '{prod}' CPI for {latest_date}: {latest_val}", "yellow"))
+            print(colored(f"   Details: Vector={sample_vector}, Coordinate={sample_coord}", "yellow"))
+        else:
+             print(colored("❌ Agent: No data found to analyze.", "red"))
+             return
+
+        # Step 5: Verify fetch_data_by_vector
+        if sample_vector:
+            print(colored(f"🤖 Agent: Verifying fetch_data_by_vector for {sample_vector}...", "green"))
+            res = self.send_request("call_tool", {
+                "name": "fetch_data_by_vector",
+                "arguments": {"vectors": [sample_vector]}
+            })
+
+            if "error" in res and res["error"]:
+                 print(colored(f"❌ Agent: Error fetching by vector: {res['error']}", "red"))
+            else:
+                 content = res['result']['content'][0]['text']
+                 vec_data = json.loads(content)
+                 print(colored(f"✅ Agent: Successfully fetched {len(vec_data)} rows by vector.", "green"))
+                 if vec_data:
+                     print(colored(f"   Value: {vec_data[0].get('value')} (Should match {latest_val})", "blue"))
+
+        # Step 6: Verify fetch_data_by_coords
+        if sample_coord:
+            print(colored(f"🤖 Agent: Verifying fetch_data_by_coords for {sample_coord}...", "green"))
+            res = self.send_request("call_tool", {
+                "name": "fetch_data_by_coords",
+                "arguments": {"pid": str(target_pid), "coords": [sample_coord]}
+            })
+            
+            if "error" in res and res["error"]:
+                 print(colored(f"❌ Agent: Error fetching by coords: {res['error']}", "red"))
+            else:
+                 content = res['result']['content'][0]['text']
+                 coord_data = json.loads(content)
+                 print(colored(f"✅ Agent: Successfully fetched {len(coord_data)} rows by coord.", "green"))
+                 if coord_data:
+                     # API might return slightly different field names in full response vs snippet
+                     # But usually 'value' or 'VALUE'
+                     val = coord_data[0].get('value') or coord_data[0].get('VALUE')
+                     print(colored(f"   Value: {val} (Should match {latest_val})", "blue"))
+
+        # Step 7: Report
         print(colored("\n" + "="*40, "blue"))
         print(colored(f"📢 Agent Report: \n'Based on the latest Statistics Canada data, the Consumer Price Index for British Columbia in {latest_date} was {latest_val}.'", "blue"))
         print(colored("="*40 + "\n", "blue"))

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: stat-can-mcp
+    env: docker
+    plan: free
+    region: oregon
+    buildCommand: docker build -t stat-can-mcp .
+    startCommand: ./target/release/mcp_server --port $PORT
+    envVars:
+      - key: MCP_API_KEY
+        generateValue: true
+      - key: LOG_FORMAT
+        value: json
+    healthCheckPath: /mcp/sse

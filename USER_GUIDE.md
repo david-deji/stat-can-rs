@@ -43,6 +43,11 @@ export MCP_API_KEY="your-secure-api-key"
 ```
 *   **Port**: Specified by `--port` or `MCP_PORT` env var.
 *   **Auth**: Bearer token required via `Authorization: Bearer <key>`.
+*   **Registration**: If configured, you can self-register for a key:
+    ```bash
+    curl -X POST http://localhost:3000/register
+    # Response: {"api_key": "sk_live_..."}
+    ```
 
 ## Available Tools
 
@@ -52,6 +57,8 @@ export MCP_API_KEY="your-secure-api-key"
 | `search_cubes` | Search for cubes by title. | `query` (string) |
 | `get_metadata` | Get metadata for a specific cube. | `pid` (string) |
 | `fetch_data_snippet` | Fetch and filter data from a cube. | `pid` (string), `geo` (optional string), `recent_months` (optional int) |
+| `fetch_data_by_vector` | Fetch specific data points by Vector ID. | `vectors` (array of strings) |
+| `fetch_data_by_coords` | Fetch specific data points by Coordinate. | `pid` (string), `coords` (array of strings) |
 
 ## Example Usage (AI Agent)
 
