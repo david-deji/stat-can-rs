@@ -1,5 +1,18 @@
-# statcan-rs
+# StatCan RS
 
+A Rust client and **Model Context Protocol (MCP) Server** for the Statistics Canada API.
+
+## 🤖 MCP Server (AI Integration)
+This project includes a fully featured MCP server that allows AI agents to search, filter, and retrieve Statistics Canada data.
+
+**Key Features:**
+- **Smart Filtering**: Filter by Geography and Date.
+- **High Performance**: Streaming downloads and local caching.
+- **Dual Mode**: Support for Stdio and HTTP/SSE.
+
+👉 **[Read the MCP User Guide](USER_GUIDE.md)** for setup and usage instructions.
+
+## Library Features
 A high-performance, async Rust client for the [Statistics Canada Web Data Service (WDS)](https://www.statcan.gc.ca/eng/developers/wds).
 
 Designed for data engineers and analysts, `statcan-rs` provides a strongly-typed interface to search for data cubes, fetch metadata, and—most importantly—download full datasets directly into [Polars](https://pola.rs/) DataFrames for immediate analysis.

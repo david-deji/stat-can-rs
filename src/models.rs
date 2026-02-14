@@ -12,7 +12,25 @@ pub struct CubeListResponse {
 pub struct Cube {
     pub cube_title_en: String,
     pub cube_pid: Option<String>,
-    pub product_id: i64,
+    #[serde(deserialize_with = "deserialize_int_or_string")]
+    pub product_id: String,
+}
+
+fn deserialize_int_or_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrString {
+        Int(i64),
+        String(String),
+    }
+
+    match IntOrString::deserialize(deserializer)? {
+        IntOrString::Int(v) => Ok(v.to_string()),
+        IntOrString::String(v) => Ok(v),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

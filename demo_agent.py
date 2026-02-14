@@ -4,7 +4,7 @@ import sys
 import time
 import os
 
-MCP_SERVER_BIN = "./target/debug/mcp_server"
+MCP_SERVER_BIN = "./target/release/mcp_server"
 
 def colored(text, color):
     colors = {
@@ -60,6 +60,14 @@ class Agent:
             "arguments": {"query": "Consumer Price Index"}
         })
         
+        if "error" in res and res["error"]:
+            print(colored(f"❌ Agent: Error calling search_cubes: {res['error']}", "red"))
+            return
+
+        if "result" not in res:
+             print(colored(f"❌ Agent: Unexpected response structure: {res}", "red"))
+             return
+
         content_str = res['result']['content'][0]['text']
         cubes = json.loads(content_str)
         
@@ -69,8 +77,11 @@ class Agent:
         target_pid = None
         for cube in cubes:
             title = cube.get('cubeTitleEn', '').lower()
+            # PID is now a string in the Rust model, so it comes as a string in JSON
+            # But let's be safe and cast to str just in case
+            pid = str(cube.get('productId', ''))
             if "consumer price index" in title and "monthly" in title and "not seasonally adjusted" in title:
-                target_pid = str(cube['productId'])
+                target_pid = pid
                 print(colored(f"🤖 Agent: Found the standard monthly CPI table: {cube['cubeTitleEn']} (PID: {target_pid})", "green"))
                 break
         
