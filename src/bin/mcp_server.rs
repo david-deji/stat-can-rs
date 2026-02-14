@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 use statcan_rs::StatCanClient;
 use std::{convert::Infallible, io::BufRead, sync::Arc};
 use tokio::sync::broadcast;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -573,6 +575,7 @@ async fn http_mode(
     // Rate Limiting: 60 r/m default, but stricter for /register
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(SmartIpKeyExtractor)
             .per_second(2)
             .burst_size(10)
             .finish()
