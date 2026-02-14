@@ -1,30 +1,31 @@
-use polars::prelude::*;
 use crate::StatCanError;
+use polars::prelude::*;
+use std::ops::Deref;
 
-pub struct StatCanDataFrame {
-    df: DataFrame,
-}
+pub struct StatCanDataFrame(pub DataFrame);
 
 impl StatCanDataFrame {
     pub fn new(df: DataFrame) -> Self {
-        Self { df }
+        Self(df)
     }
 
     pub fn into_polars(self) -> DataFrame {
-        self.df
+        self.0
     }
 
     pub fn as_polars(&self) -> &DataFrame {
-        &self.df
+        &self.0
     }
 
     /// Filter by Geography (GEO column)
     /// Supports literal matching or partial matching if strict is false (but we'll stick to simple contains for now)
     pub fn filter_geo(self, pattern: &str) -> Result<Self, StatCanError> {
-        let df = self.df.lazy()
+        let df = self
+            .0
+            .lazy()
             .filter(col("GEO").str().contains_literal(lit(pattern)))
             .collect()?;
-        Ok(Self { df })
+        Ok(Self(df))
     }
 
     /// Filter by Reference Date (REF_DATE column)
@@ -33,38 +34,88 @@ impl StatCanDataFrame {
         // We need to parse REF_DATE first if it's not already a date
         // StatCan usually gives "YYYY-MM" strings.
         // We append "-01" to make it a valid date for parsing if it's just YYYY-MM
-        let df = self.df.lazy()
+        let df = self
+            .0
+            .lazy()
             .with_column(
                 (col("REF_DATE") + lit("-01"))
-                    .str().strptime(DataType::Date, StrptimeOptions {
-                        format: Some("%Y-%m-%d".into()),
-                        strict: false, 
-                        exact: false, 
-                        ..Default::default()
-                    }, lit("raise"))
-                    .alias("parsed_date")
+                    .str()
+                    .strptime(
+                        DataType::Date,
+                        StrptimeOptions {
+                            format: Some("%Y-%m-%d".into()),
+                            strict: false,
+                            exact: false,
+                            ..Default::default()
+                        },
+                        lit("raise"),
+                    )
+                    .alias("parsed_date"),
             )
             .filter(col("parsed_date").dt().year().gt_eq(lit(start_year)))
             .filter(col("parsed_date").dt().year().lt_eq(lit(end_year)))
             .collect()?;
-            
-        Ok(Self { df })
+
+        Ok(Self(df))
     }
-    
+
     /// Filter by a specific column value
     pub fn filter_column(self, col_name: &str, value: &str) -> Result<Self, StatCanError> {
-        let df = self.df.lazy()
+        let df = self
+            .0
+            .lazy()
             .filter(col(col_name).eq(lit(value)))
             .collect()?;
-        Ok(Self { df })
+        Ok(Self(df))
     }
 
     /// Inspect unique values of a column (useful for debugging)
     pub fn inspect_column(&self, col_name: &str) -> Result<(), StatCanError> {
-        let unique = self.df.column(col_name).map_err(StatCanError::from)?.unique()?;
+        let unique = self
+            .0
+            .column(col_name)
+            .map_err(StatCanError::from)?
+            .unique()?;
         println!("Unique values for '{}':", col_name);
         println!("{:?}", unique.head(Some(20)));
         Ok(())
+    }
+
+    /// Sort by REF_DATE
+    pub fn sort_date(self, descending: bool) -> Result<Self, StatCanError> {
+        // Assume REF_DATE exists
+        let df = self
+            .0
+            .lazy()
+            .sort(
+                "REF_DATE",
+                SortOptions {
+                    descending,
+                    ..Default::default()
+                },
+            )
+            .collect()?;
+        Ok(Self(df))
+    }
+
+    /// Take top N rows
+    pub fn take_n(self, n: usize) -> Result<Self, StatCanError> {
+        let df = self.0.head(Some(n));
+        Ok(Self(df))
+    }
+
+    /// Take bottom N rows
+    pub fn take_last_n(self, n: usize) -> Result<Self, StatCanError> {
+        let df = self.0.tail(Some(n));
+        Ok(Self(df))
+    }
+}
+
+impl Deref for StatCanDataFrame {
+    type Target = DataFrame;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -78,7 +129,8 @@ mod tests {
             "REF_DATE" => &["2020-01", "2021-06", "2022-12"],
             "VALUE" => &[100.0, 200.0, 300.0],
             "Category" => &["A", "B", "A"]
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -87,9 +139,12 @@ mod tests {
         let wrapper = StatCanDataFrame::new(df);
         let filtered = wrapper.filter_geo("Ontario").unwrap();
         let res = filtered.as_polars();
-        
+
         assert_eq!(res.height(), 1);
-        assert_eq!(res.column("GEO").unwrap().get(0).unwrap(), AnyValue::String("Ontario"));
+        assert_eq!(
+            res.column("GEO").unwrap().get(0).unwrap(),
+            AnyValue::String("Ontario")
+        );
     }
 
     #[test]
@@ -99,10 +154,18 @@ mod tests {
         // 2021 to 2022
         let filtered = wrapper.filter_date_range(2021, 2022).unwrap();
         let res = filtered.as_polars();
-        
+
         assert_eq!(res.height(), 2); // 2021-06 and 2022-12
-        
-        let dates: Vec<String> = res.column("REF_DATE").unwrap().str().unwrap().into_iter().flatten().map(|s| s.to_string()).collect();
+
+        let dates: Vec<String> = res
+            .column("REF_DATE")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|s| s.to_string())
+            .collect();
         assert!(dates.contains(&"2021-06".to_string()));
         assert!(dates.contains(&"2022-12".to_string()));
     }
@@ -113,7 +176,7 @@ mod tests {
         let wrapper = StatCanDataFrame::new(df);
         let filtered = wrapper.filter_column("Category", "A").unwrap();
         let res = filtered.as_polars();
-        
+
         assert_eq!(res.height(), 2); // Canada (A) and Alberta (A)
     }
 }
