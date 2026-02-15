@@ -82,9 +82,9 @@ async fn main() -> anyhow::Result<()> {
 // --- Protocol Types ---
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct JsonRpcRequest {
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     method: String,
     params: Option<Value>,
     id: Option<Value>,
