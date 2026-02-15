@@ -520,4 +520,55 @@ mod tests {
         let val = res.column("GEO").unwrap().str().unwrap().get(0).unwrap();
         assert_eq!(val, "Ontario");
     }
+
+    #[test]
+    fn test_resolve_column_name_fuzzy_logic() {
+        // Columns: "AAA", "AAB", "BBA"
+        let df = df!(
+            "AAA" => &[1],
+            "AAB" => &[1],
+            "BBA" => &[1]
+        )
+        .unwrap();
+        let wrapper = StatCanDataFrame::new(df);
+
+        // Exact
+        assert_eq!(wrapper.resolve_column_name("AAA").unwrap(), "AAA");
+
+        // Case-insensitive
+        assert_eq!(wrapper.resolve_column_name("aaa").unwrap(), "AAA");
+
+        // Substring
+        // "B" -> "AAB" contains "B", "BBA" contains "B". "AAB" comes first.
+        assert_eq!(wrapper.resolve_column_name("B").unwrap(), "AAB");
+
+        // "BB" -> "BBA"
+        assert_eq!(wrapper.resolve_column_name("BB").unwrap(), "BBA");
+
+        // No match
+        assert!(wrapper.resolve_column_name("ZZZ").is_err());
+    }
+
+    #[test]
+    fn test_resolve_column_name_priority() {
+        // "Value" contains "val". "Val" equals "val" (ignoring case).
+        // Priority should find "Val" even if "Value" is earlier in the list
+        // (assuming Case-Insensitive check comes before Substring check).
+
+        let df = df!("Value" => &[1], "Val" => &[1]).unwrap();
+        let wrapper = StatCanDataFrame::new(df);
+
+        // Exact match
+        assert_eq!(wrapper.resolve_column_name("Val").unwrap(), "Val");
+
+        // Case-insensitive exact match
+        // "val" matches "Val" (case-insensitive)
+        // "val" is substring of "Value"
+        // If substring check was first, it might pick "Value" (since it comes first).
+        // But case-insensitive is checked first.
+        assert_eq!(wrapper.resolve_column_name("val").unwrap(), "Val");
+
+        // Substring match
+        assert_eq!(wrapper.resolve_column_name("alu").unwrap(), "Value");
+    }
 }

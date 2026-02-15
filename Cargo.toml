@@ -34,6 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.4", features = ["derive", "env"] }
 anyhow = "1.0"
+regex = "1.11"
 crossbeam-channel = "0.5" # For SSE channel
 tower_governor = "0.4"
 governor = "0.6"
