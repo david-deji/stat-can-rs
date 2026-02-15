@@ -2,6 +2,7 @@ pub mod models;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod wrapper;
+pub mod security;
 
 pub use wrapper::StatCanDataFrame;
 
