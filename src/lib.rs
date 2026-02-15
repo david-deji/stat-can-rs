@@ -129,6 +129,24 @@ impl StatCanClient {
         }
     }
 
+    pub async fn get_cubes_metadata_batch(
+        &self,
+        pids: Vec<String>,
+    ) -> Result<Vec<CubeMetadataResponse>> {
+        let url = format!("{}/getCubeMetadata", BASE_URL);
+        let body_req: Vec<_> = pids
+            .iter()
+            .map(|pid| json!({ "productId": pid }))
+            .collect();
+        let resp = self.client.post(&url).json(&body_req).send().await?;
+
+        let body_resp = self.parse_statcan_response(resp).await?;
+        let data: Vec<CubeMetadataResponse> = serde_json::from_value(body_resp)
+            .map_err(|e| StatCanError::Api(format!("Failed to parse metadata: {}", e)))?;
+
+        Ok(data)
+    }
+
     /// Find cubes that contain a specific dimension name (case-insensitive substring)
     /// Optimizes by searching titles first, then checking metadata of top matches.
     pub async fn find_cubes_by_dimension(
@@ -152,37 +170,43 @@ impl StatCanClient {
 
         let mut results = Vec::new();
 
-        // 3. Inspect Metadata for candidates
-        for cube in candidates {
-            // Respect user limit on RESULTS
-            if results.len() >= limit {
-                break;
-            }
+        let pids: Vec<String> = candidates.iter().map(|c| c.product_id.clone()).collect();
+        if pids.is_empty() {
+            return Ok(results);
+        }
 
-            // Fetch metadata (might be slow loop, but constrained to 50 iterations max and breaks early)
-            // In a real app we might parallelize this with join_all
-            if let Ok(meta) = self.get_cube_metadata(&cube.product_id).await {
-                if let Some(obj) = meta.object {
-                    // Check if any dimension matches query strictly
-                    let has_dim = obj
-                        .dimension
-                        .iter()
-                        .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+        // 3. Inspect Metadata for candidates (Batched)
+        // Fetch metadata in one go instead of sequential requests
+        if let Ok(metadata_list) = self.get_cubes_metadata_batch(pids).await {
+            for meta_resp in metadata_list {
+                // Respect user limit on RESULTS
+                if results.len() >= limit {
+                    break;
+                }
 
-                    if has_dim {
-                        results.push((
-                            cube.product_id.clone(),
-                            cube.cube_title_en.clone(),
-                            // Return the specifically matching dimension name(s) joined?
-                            obj.dimension
-                                .iter()
-                                .filter(|d| {
-                                    d.dimension_name_en.to_lowercase().contains(&query_lower)
-                                })
-                                .map(|d| d.dimension_name_en.clone())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        ));
+                if meta_resp.status == "SUCCESS" {
+                    if let Some(obj) = meta_resp.object {
+                        // Check if any dimension matches query strictly
+                        let has_dim = obj
+                            .dimension
+                            .iter()
+                            .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+
+                        if has_dim {
+                            results.push((
+                                obj.product_id.clone(),
+                                obj.cube_title_en.clone(),
+                                // Return the specifically matching dimension name(s) joined?
+                                obj.dimension
+                                    .iter()
+                                    .filter(|d| {
+                                        d.dimension_name_en.to_lowercase().contains(&query_lower)
+                                    })
+                                    .map(|d| d.dimension_name_en.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            ));
+                        }
                     }
                 }
             }
