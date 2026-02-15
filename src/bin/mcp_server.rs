@@ -19,7 +19,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use statcan_rs::StatCanClient;
+use statcan_rs::{StatCanClient, StatCanClientTrait};
 use std::{convert::Infallible, io::BufRead, sync::{Arc, OnceLock}};
 use tokio::sync::broadcast;
 use tower_governor::{
@@ -129,8 +129,8 @@ impl JsonRpcError {
 
 // --- Core Logic ---
 
-async fn handle_request(
-    client: Arc<StatCanClient>,
+async fn handle_request<C: StatCanClientTrait>(
+    client: Arc<C>,
     method: &str,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
@@ -860,6 +860,94 @@ async fn sse_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polars::prelude::*;
+    use statcan_rs::{
+        models::{
+            Cube, CubeListResponse, CubeMetadata, CubeMetadataResponse, DataResponse, Dimension,
+            Member,
+        },
+        Result, StatCanDataFrame, StatCanError,
+    };
+
+    struct MockStatCanClient;
+
+    impl StatCanClientTrait for MockStatCanClient {
+        async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
+            Ok(CubeListResponse {
+                status: "SUCCESS".to_string(),
+                object: Some(vec![Cube {
+                    product_id: "98765432".to_string(),
+                    cube_title_en: "Mocked Cube Title".to_string(),
+                    cube_pid: Some("98765432".to_string()),
+                }]),
+            })
+        }
+
+        async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
+            if pid == "error" {
+                return Err(StatCanError::Api("Mocked API Error".to_string()));
+            }
+            Ok(CubeMetadataResponse {
+                status: "SUCCESS".to_string(),
+                object: Some(CubeMetadata {
+                    product_id: pid.to_string(),
+                    cube_title_en: "Mocked Cube".to_string(),
+                    dimension: vec![Dimension {
+                        dimension_name_en: "Geography".to_string(),
+                        dimension_position_id: 1,
+                        member: vec![Member {
+                            member_id: 1,
+                            member_name_en: "Canada".to_string(),
+                            classification_code: Some("11124".to_string()),
+                        }],
+                    }],
+                }),
+            })
+        }
+
+        async fn find_cubes_by_dimension(
+            &self,
+            dim_query: &str,
+            _limit: usize,
+        ) -> Result<Vec<(String, String, String)>> {
+            Ok(vec![(
+                "12345".to_string(),
+                "Found Cube".to_string(),
+                dim_query.to_string(),
+            )])
+        }
+
+        async fn get_data_from_vectors(
+            &self,
+            _vectors: Vec<String>,
+            _periods: i32,
+        ) -> Result<DataResponse> {
+            Ok(DataResponse {
+                status: "SUCCESS".to_string(),
+                object: Some(vec![]),
+            })
+        }
+
+        async fn get_data_from_coords(
+            &self,
+            _pid: &str,
+            _coords: Vec<String>,
+            _periods: i32,
+        ) -> Result<DataResponse> {
+            Ok(DataResponse {
+                status: "SUCCESS".to_string(),
+                object: Some(vec![]),
+            })
+        }
+
+        async fn fetch_fast_snippet(&self, _pid: &str) -> Result<StatCanDataFrame> {
+            Ok(StatCanDataFrame::new(DataFrame::default()))
+        }
+
+        async fn fetch_full_table(&self, _pid: &str) -> Result<StatCanDataFrame> {
+            Ok(StatCanDataFrame::new(DataFrame::default()))
+        }
+    }
 
     #[test]
     fn test_email_validation() {
@@ -883,5 +971,67 @@ mod tests {
         assert!(!is_valid_email("あいうえお@example.com"));
         assert!(!is_valid_email("email@example.com (Joe Smith)"));
         assert!(!is_valid_email("email@example"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_tools_list() {
+        let client = Arc::new(MockStatCanClient);
+        let resp = handle_request(client, "tools/list", None).await;
+        assert!(resp.is_ok());
+        let val = resp.unwrap();
+        let tools = val["tools"].as_array();
+        assert!(tools.is_some());
+        assert!(!tools.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_list_cubes() {
+        let client = Arc::new(MockStatCanClient);
+        let params = json!({
+            "name": "list_cubes",
+            "arguments": {}
+        });
+        let resp = handle_request(client, "tools/call", Some(params)).await;
+        assert!(resp.is_ok());
+        let val = resp.unwrap();
+        let content = val["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Mocked Cube Title"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_get_metadata() {
+        let client = Arc::new(MockStatCanClient);
+        let params = json!({
+            "name": "get_metadata",
+            "arguments": { "pid": "12345" }
+        });
+        let resp = handle_request(client, "tools/call", Some(params)).await;
+        assert!(resp.is_ok());
+        let val = resp.unwrap();
+        let content = val["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Mocked Cube"));
+        assert!(text.contains("Geography"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_error_handling() {
+        let client = Arc::new(MockStatCanClient);
+        // Test missing params
+        let resp = handle_request(client.clone(), "tools/call", None).await;
+        assert!(resp.is_err());
+        assert_eq!(resp.unwrap_err().code, -32602);
+
+        // Test API error propagation
+        let params = json!({
+            "name": "get_metadata",
+            "arguments": { "pid": "error" }
+        });
+        let resp = handle_request(client, "tools/call", Some(params)).await;
+        assert!(resp.is_err());
+        let err = resp.unwrap_err();
+        assert_eq!(err.code, -32000);
+        assert!(err.message.contains("Mocked API Error"));
     }
 }
