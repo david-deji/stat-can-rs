@@ -63,6 +63,32 @@ impl StatCanClient {
         Ok(Self { client })
     }
 
+    fn extract_data_points(responses: Vec<VectorDataResponse>) -> Vec<DataPoint> {
+        let mut all_points = Vec::new();
+        for r in responses {
+            if r.status == "SUCCESS" {
+                if let Some(obj) = r.object {
+                    for vp in obj.vector_data_point {
+                        all_points.push(DataPoint {
+                            vector_id: obj.vector_id,
+                            coordinate: obj.coordinate.clone(),
+                            ref_date: vp.ref_per,
+                            value: vp.value,
+                            decimals: vp.decimals,
+                            scalar_factor_code: vp.scalar_factor_code,
+                            symbol_code: vp.symbol_code,
+                            status_code: vp.status_code,
+                            security_level_code: vp.security_level_code,
+                            release_time: vp.release_time,
+                            frequency_code: vp.frequency_code,
+                        });
+                    }
+                }
+            }
+        }
+        all_points
+    }
+
     /// Helper to safely parse API response, handling plain text or HTML errors
     async fn parse_statcan_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
         let status = resp.status();
@@ -258,28 +284,7 @@ impl StatCanClient {
         })?;
 
         // Flatten and map to DataResponse
-        let mut all_points = Vec::new();
-        for r in responses {
-            if r.status == "SUCCESS" {
-                if let Some(obj) = r.object {
-                    for vp in obj.vector_data_point {
-                        all_points.push(DataPoint {
-                            vector_id: obj.vector_id,
-                            coordinate: obj.coordinate.clone(),
-                            ref_date: vp.ref_per,
-                            value: vp.value,
-                            decimals: vp.decimals,
-                            scalar_factor_code: vp.scalar_factor_code,
-                            symbol_code: vp.symbol_code,
-                            status_code: vp.status_code,
-                            security_level_code: vp.security_level_code,
-                            release_time: vp.release_time,
-                            frequency_code: vp.frequency_code,
-                        });
-                    }
-                }
-            }
-        }
+        let all_points = Self::extract_data_points(responses);
 
         Ok(DataResponse {
             status: "SUCCESS".to_string(),
@@ -358,28 +363,7 @@ impl StatCanClient {
             })?;
 
         // Flatten and map
-        let mut all_points = Vec::new();
-        for r in responses {
-            if r.status == "SUCCESS" {
-                if let Some(obj) = r.object {
-                    for vp in obj.vector_data_point {
-                        all_points.push(DataPoint {
-                            vector_id: obj.vector_id,
-                            coordinate: obj.coordinate.clone(),
-                            ref_date: vp.ref_per,
-                            value: vp.value,
-                            decimals: vp.decimals,
-                            scalar_factor_code: vp.scalar_factor_code,
-                            symbol_code: vp.symbol_code,
-                            status_code: vp.status_code,
-                            security_level_code: vp.security_level_code,
-                            release_time: vp.release_time,
-                            frequency_code: vp.frequency_code,
-                        });
-                    }
-                }
-            }
-        }
+        let all_points = Self::extract_data_points(responses);
 
         Ok(DataResponse {
             status: "SUCCESS".to_string(),
