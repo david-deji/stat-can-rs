@@ -37,6 +37,19 @@ pub enum StatCanError {
 
 pub type Result<T> = std::result::Result<T, StatCanError>;
 
+pub(crate) fn pad_coordinate(coord: &str) -> String {
+    let c = coord.trim();
+    let parts: Vec<&str> = c.split('.').collect();
+    let mut padded_string = c.to_string();
+    if parts.len() < 10 {
+        let needed = 10 - parts.len();
+        for _ in 0..needed {
+            padded_string.push_str(".0");
+        }
+    }
+    padded_string
+}
+
 pub struct StatCanClient {
     client: Client,
 }
@@ -189,19 +202,13 @@ impl StatCanClient {
         let payload: Vec<_> = coords
             .into_iter()
             .map(|c_owned| {
-                let c = c_owned.trim();
-                let parts: Vec<&str> = c.split('.').collect();
-                let mut padded_string = c.to_string();
-                if parts.len() < 10 {
-                    let needed = 10 - parts.len();
-                    for _ in 0..needed {
-                        padded_string.push_str(".0");
-                    }
-                }
+                let padded_string = pad_coordinate(&c_owned);
 
                 info!(
                     "Fetching coord: original='{}', padded='{}', periods={}",
-                    c, padded_string, periods
+                    c_owned.trim(),
+                    padded_string,
+                    periods
                 );
 
                 let pid_val = if let Ok(n) = pid.parse::<i64>() {
@@ -495,5 +502,44 @@ impl StatCanClient {
         .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(StatCanDataFrame::new(df))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pad_coordinate_basic() {
+        assert_eq!(pad_coordinate("1.1.1"), "1.1.1.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_no_padding_needed() {
+        let full_coord = "1.1.1.1.1.1.1.1.1.1";
+        assert_eq!(pad_coordinate(full_coord), full_coord);
+    }
+
+    #[test]
+    fn test_pad_coordinate_trimming() {
+        assert_eq!(pad_coordinate("  1.2.3  "), "1.2.3.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_single_part() {
+        assert_eq!(pad_coordinate("1"), "1.0.0.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_empty() {
+        // Current logic: "" -> [""] -> len 1 -> needs 9 -> ".0.0.0.0.0.0.0.0.0"
+        // This is arguably a bug but we are testing current behavior after refactor.
+        assert_eq!(pad_coordinate(""), ".0.0.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_already_long() {
+        let long_coord = "1.2.3.4.5.6.7.8.9.10.11.12";
+        assert_eq!(pad_coordinate(long_coord), long_coord);
     }
 }
