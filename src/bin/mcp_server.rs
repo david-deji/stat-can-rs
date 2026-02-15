@@ -558,7 +558,7 @@ async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyh
         }
 
         // Enforce Rate Limit
-        if let Err(_) = limiter.check() {
+        if limiter.check().is_err() {
             // If rate limited, we should probably return an error JSON-RPC response
             // asking the client to back off, or just block.
             // Blocking is better for stdio as it acts as backpressure.
