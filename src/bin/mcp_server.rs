@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use futures::stream::{self, StreamExt};
 use futures::Stream;
 use polars::prelude::SerWriter;
 use postgrest::Postgrest;
@@ -788,10 +789,36 @@ async fn handle_http_message(
 }
 
 async fn sse_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // Basic SSE implementation - mostly a placeholder as MCP primarily uses request/response
-    // But protocol allows server notifications.
-    let stream = futures::stream::iter(vec![]); // Empty for now
+    let rx = state.sender.subscribe();
+
+    // 1. Send the endpoint event immediately so the client knows where to POST
+    let endpoint_event = Event::default()
+        .event("endpoint")
+        .data("/mcp/messages");
+
+    // 2. Stream notifications/messages from the broadcast channel
+    let notification_stream = stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    // MCP notifications and responses over SSE use the 'message' event name
+                    return Some((Ok(Event::default().event("message").data(msg)), rx));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // If we're lagging, just skip to the next message
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    // Channel closed, end the stream
+                    return None;
+                }
+            }
+        }
+    });
+
+    let stream = stream::once(async { Ok(endpoint_event) }).chain(notification_stream);
+
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
