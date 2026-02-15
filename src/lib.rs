@@ -112,9 +112,13 @@ impl StatCanClient {
     async fn parse_statcan_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        Self::parse_response_body(status, &text)
+    }
 
+    /// Pure function to parse response body, exposed for testing logic
+    fn parse_response_body(status: reqwest::StatusCode, text: &str) -> Result<serde_json::Value> {
         // 1. Try to parse as JSON
-        match serde_json::from_str::<serde_json::Value>(&text) {
+        match serde_json::from_str::<serde_json::Value>(text) {
             Ok(json) => Ok(json),
             Err(_) => {
                 // 2. Parsing failed. Inspect raw text.
@@ -593,5 +597,45 @@ mod tests {
     fn test_pad_coordinate_already_long() {
         let long_coord = "1.2.3.4.5.6.7.8.9.10.11.12";
         assert_eq!(pad_coordinate(long_coord), long_coord);
+    }
+
+    #[test]
+    fn test_parse_statcan_response_logic() {
+        // 1. Valid JSON
+        let valid_json = r#"{"status": "SUCCESS", "object": []}"#;
+        let res = StatCanClient::parse_response_body(reqwest::StatusCode::OK, valid_json);
+        assert!(res.is_ok());
+        let val = res.unwrap();
+        assert_eq!(val["status"], "SUCCESS");
+
+        // 2. Data not found (starts with D, contains "not found")
+        let not_found_text = "Data not found for this cube";
+        let res = StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StatCanError::Api(msg) => assert!(msg.contains("StatCan API Error: Data not found")),
+            _ => panic!("Expected Api error"),
+        }
+
+        // 3. HTML Error
+        let html_error = "<html><body>Error</body></html>";
+        let res = StatCanClient::parse_response_body(reqwest::StatusCode::BAD_GATEWAY, html_error);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StatCanError::Api(msg) => {
+                assert!(msg.contains("StatCan Gateway Error"));
+                assert!(msg.contains("502")); // BAD_GATEWAY is 502
+            }
+            _ => panic!("Expected Api error"),
+        }
+
+        // 4. Generic fallback (Invalid JSON, not special case)
+        let garbage = "This is not JSON and not special error";
+        let res = StatCanClient::parse_response_body(reqwest::StatusCode::OK, garbage);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StatCanError::Api(msg) => assert!(msg.contains("Invalid JSON response")),
+            _ => panic!("Expected Api error"),
+        }
     }
 }
