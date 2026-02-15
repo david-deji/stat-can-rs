@@ -14,8 +14,10 @@ use futures::future::join_all;
 use polars::prelude::*;
 use reqwest::Client;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 const BASE_URL: &str = "https://www150.statcan.gc.ca/t1/wds/rest";
@@ -38,8 +40,22 @@ pub enum StatCanError {
 
 pub type Result<T> = std::result::Result<T, StatCanError>;
 
+pub(crate) fn pad_coordinate(coord: &str) -> String {
+    let c = coord.trim();
+    let parts: Vec<&str> = c.split('.').collect();
+    let mut padded_string = c.to_string();
+    if parts.len() < 10 {
+        let needed = 10 - parts.len();
+        for _ in 0..needed {
+            padded_string.push_str(".0");
+        }
+    }
+    padded_string
+}
+
 pub struct StatCanClient {
     client: Client,
+    cubes_cache: Arc<RwLock<Option<Vec<Cube>>>>,
 }
 
 impl StatCanClient {
@@ -48,7 +64,49 @@ impl StatCanClient {
             .timeout(Duration::from_secs(30))
             .gzip(true)
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            cubes_cache: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    fn extract_data_points(responses: Vec<VectorDataResponse>) -> Vec<DataPoint> {
+        let mut all_points = Vec::new();
+        for r in responses {
+            if r.status == "SUCCESS" {
+                if let Some(obj) = r.object {
+                    for vp in obj.vector_data_point {
+                        all_points.push(DataPoint {
+                            vector_id: obj.vector_id,
+                            coordinate: obj.coordinate.clone(),
+                            ref_date: vp.ref_per,
+                            value: vp.value,
+                            decimals: vp.decimals,
+                            scalar_factor_code: vp.scalar_factor_code,
+                            symbol_code: vp.symbol_code,
+                            status_code: vp.status_code,
+                            security_level_code: vp.security_level_code,
+                            release_time: vp.release_time,
+                            frequency_code: vp.frequency_code,
+                        });
+                    }
+                }
+            }
+        }
+        all_points
+    }
+
+    fn validate_pid(pid: &str) -> Result<()> {
+        if pid.is_empty() {
+            return Err(StatCanError::Api("PID cannot be empty".to_string()));
+        }
+        if !pid
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(StatCanError::Api("Invalid PID format".to_string()));
+        }
+        Ok(())
     }
 
     /// Helper to safely parse API response, handling plain text or HTML errors
@@ -85,12 +143,32 @@ impl StatCanClient {
     }
 
     pub async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
+        // 1. Check cache (Read lock)
+        {
+            let cache = self.cubes_cache.read().await;
+            if let Some(cubes) = &*cache {
+                debug!("Cache HIT for getAllCubesListLite");
+                return Ok(CubeListResponse {
+                    object: Some(cubes.clone()),
+                    status: "SUCCESS".to_string(),
+                });
+            } else {
+                debug!("Cache MISS for getAllCubesListLite");
+            }
+        }
+
         let url = format!("{}/getAllCubesListLite", BASE_URL);
         let resp = self.client.get(&url).send().await?;
 
         let body = self.parse_statcan_response(resp).await?;
         let data: Vec<Cube> = serde_json::from_value(body)
             .map_err(|e| StatCanError::Api(format!("Failed to parse cube list: {}", e)))?;
+
+        // 2. Update cache (Write lock)
+        {
+            let mut cache = self.cubes_cache.write().await;
+            *cache = Some(data.clone());
+        }
 
         Ok(CubeListResponse {
             object: Some(data),
@@ -99,6 +177,7 @@ impl StatCanClient {
     }
 
     pub async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getCubeMetadata", BASE_URL);
         let body_req = json!([{ "productId": pid }]);
         let resp = self.client.post(&url).json(&body_req).send().await?;
@@ -115,6 +194,24 @@ impl StatCanClient {
         } else {
             Err(StatCanError::Api("Empty response".to_string()))
         }
+    }
+
+    pub async fn get_cubes_metadata_batch(
+        &self,
+        pids: Vec<String>,
+    ) -> Result<Vec<CubeMetadataResponse>> {
+        let url = format!("{}/getCubeMetadata", BASE_URL);
+        let body_req: Vec<_> = pids
+            .iter()
+            .map(|pid| json!({ "productId": pid }))
+            .collect();
+        let resp = self.client.post(&url).json(&body_req).send().await?;
+
+        let body_resp = self.parse_statcan_response(resp).await?;
+        let data: Vec<CubeMetadataResponse> = serde_json::from_value(body_resp)
+            .map_err(|e| StatCanError::Api(format!("Failed to parse metadata: {}", e)))?;
+
+        Ok(data)
     }
 
     /// Find cubes that contain a specific dimension name (case-insensitive substring)
@@ -198,24 +295,19 @@ impl StatCanClient {
         coords: Vec<String>,
         periods: i32,
     ) -> Result<DataResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getDataFromCubePidCoordAndLatestNPeriods", BASE_URL);
 
         let payload: Vec<_> = coords
             .into_iter()
             .map(|c_owned| {
-                let c = c_owned.trim();
-                let parts: Vec<&str> = c.split('.').collect();
-                let mut padded_string = c.to_string();
-                if parts.len() < 10 {
-                    let needed = 10 - parts.len();
-                    for _ in 0..needed {
-                        padded_string.push_str(".0");
-                    }
-                }
+                let padded_string = pad_coordinate(&c_owned);
 
                 info!(
                     "Fetching coord: original='{}', padded='{}', periods={}",
-                    c, padded_string, periods
+                    c_owned.trim(),
+                    padded_string,
+                    periods
                 );
 
                 let pid_val = if let Ok(n) = pid.parse::<i64>() {
@@ -241,28 +333,7 @@ impl StatCanClient {
         })?;
 
         // Flatten and map to DataResponse
-        let mut all_points = Vec::new();
-        for r in responses {
-            if r.status == "SUCCESS" {
-                if let Some(obj) = r.object {
-                    for vp in obj.vector_data_point {
-                        all_points.push(DataPoint {
-                            vector_id: obj.vector_id,
-                            coordinate: obj.coordinate.clone(),
-                            ref_date: vp.ref_per,
-                            value: vp.value,
-                            decimals: vp.decimals,
-                            scalar_factor_code: vp.scalar_factor_code,
-                            symbol_code: vp.symbol_code,
-                            status_code: vp.status_code,
-                            security_level_code: vp.security_level_code,
-                            release_time: vp.release_time,
-                            frequency_code: vp.frequency_code,
-                        });
-                    }
-                }
-            }
-        }
+        let all_points = Self::extract_data_points(responses);
 
         Ok(DataResponse {
             status: "SUCCESS".to_string(),
@@ -341,28 +412,7 @@ impl StatCanClient {
             })?;
 
         // Flatten and map
-        let mut all_points = Vec::new();
-        for r in responses {
-            if r.status == "SUCCESS" {
-                if let Some(obj) = r.object {
-                    for vp in obj.vector_data_point {
-                        all_points.push(DataPoint {
-                            vector_id: obj.vector_id,
-                            coordinate: obj.coordinate.clone(),
-                            ref_date: vp.ref_per,
-                            value: vp.value,
-                            decimals: vp.decimals,
-                            scalar_factor_code: vp.scalar_factor_code,
-                            symbol_code: vp.symbol_code,
-                            status_code: vp.status_code,
-                            security_level_code: vp.security_level_code,
-                            release_time: vp.release_time,
-                            frequency_code: vp.frequency_code,
-                        });
-                    }
-                }
-            }
-        }
+        let all_points = Self::extract_data_points(responses);
 
         Ok(DataResponse {
             status: "SUCCESS".to_string(),
@@ -371,6 +421,7 @@ impl StatCanClient {
     }
 
     pub async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
+        Self::validate_pid(pid)?;
         // 1. Get Metadata to find dimensions and valid members
         let metadata = self.get_cube_metadata(pid).await?;
         let meta_obj = metadata
@@ -424,6 +475,7 @@ impl StatCanClient {
     }
 
     pub async fn get_full_cube_from_cube_pid(&self, pid: &str) -> Result<FullTableResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getFullTableDownloadCSV/{}/en", BASE_URL, pid);
         let resp = self.client.get(&url).send().await?;
         // Note: Full table download returns metadata JSON, not data. Data is in the URL inside.
@@ -449,7 +501,7 @@ impl StatCanClient {
 
     async fn fetch_file_with_cache(&self, pid: &str) -> Result<std::path::PathBuf> {
         let csv_path = self.get_cache_path(pid);
-        if csv_path.exists() {
+        if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
             info!("Cache hit for PID: {}", pid);
             return Ok(csv_path);
         }
@@ -486,7 +538,7 @@ impl StatCanClient {
             Ok(())
         })
         .await
-        .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         // Cleanup ZIP
         let _ = tokio::fs::remove_file(zip_path).await;
@@ -495,6 +547,7 @@ impl StatCanClient {
     }
 
     pub async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
+        Self::validate_pid(pid)?;
         let csv_path = self.fetch_file_with_cache(pid).await?;
 
         // 4. Parse with Polars (Blocking to avoid stalling async runtime)
@@ -506,8 +559,47 @@ impl StatCanClient {
             Ok(df)
         })
         .await
-        .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         Ok(StatCanDataFrame::new(df))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pad_coordinate_basic() {
+        assert_eq!(pad_coordinate("1.1.1"), "1.1.1.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_no_padding_needed() {
+        let full_coord = "1.1.1.1.1.1.1.1.1.1";
+        assert_eq!(pad_coordinate(full_coord), full_coord);
+    }
+
+    #[test]
+    fn test_pad_coordinate_trimming() {
+        assert_eq!(pad_coordinate("  1.2.3  "), "1.2.3.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_single_part() {
+        assert_eq!(pad_coordinate("1"), "1.0.0.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_empty() {
+        // Current logic: "" -> [""] -> len 1 -> needs 9 -> ".0.0.0.0.0.0.0.0.0"
+        // This is arguably a bug but we are testing current behavior after refactor.
+        assert_eq!(pad_coordinate(""), ".0.0.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_already_long() {
+        let long_coord = "1.2.3.4.5.6.7.8.9.10.11.12";
+        assert_eq!(pad_coordinate(long_coord), long_coord);
     }
 }
