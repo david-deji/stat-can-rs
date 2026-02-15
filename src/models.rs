@@ -130,3 +130,54 @@ pub struct StatCanErrorResponse {
     pub object: Option<String>,
     pub message: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[test]
+    fn test_deserialize_int_or_string() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_int_or_string")]
+            val: String,
+        }
+
+        // Test with string input
+        let json_str = r#"{"val": "12345"}"#;
+        let s: TestStruct = serde_json::from_str(json_str).expect("Failed to deserialize string");
+        assert_eq!(s.val, "12345");
+
+        // Test with integer input
+        let json_int = r#"{"val": 98765}"#;
+        let s: TestStruct = serde_json::from_str(json_int).expect("Failed to deserialize int");
+        assert_eq!(s.val, "98765");
+    }
+
+    #[test]
+    fn test_cube_deserialization_with_int_product_id() {
+        let json_data = r#"{
+            "cubeTitleEn": "Test Cube",
+            "cubePid": "12345",
+            "productId": 98765
+        }"#;
+
+        let cube: Cube = serde_json::from_str(json_data).expect("Failed to deserialize Cube with int productId");
+        assert_eq!(cube.product_id, "98765");
+        assert_eq!(cube.cube_title_en, "Test Cube");
+    }
+
+    #[test]
+    fn test_cube_deserialization_with_string_product_id() {
+        let json_data = r#"{
+            "cubeTitleEn": "Test Cube",
+            "cubePid": "12345",
+            "productId": "98765"
+        }"#;
+
+        let cube: Cube = serde_json::from_str(json_data).expect("Failed to deserialize Cube with string productId");
+        assert_eq!(cube.product_id, "98765");
+        assert_eq!(cube.cube_title_en, "Test Cube");
+    }
+}
