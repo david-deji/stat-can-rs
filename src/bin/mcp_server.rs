@@ -97,6 +97,34 @@ struct JsonRpcError {
     message: String,
 }
 
+impl JsonRpcResponse {
+    fn from_result(result: Result<Value, JsonRpcError>, id: Option<Value>) -> Self {
+        match result {
+            Ok(res) => Self {
+                jsonrpc: "2.0".to_string(),
+                result: Some(res),
+                error: None,
+                id,
+            },
+            Err(err) => Self {
+                jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(err),
+                id,
+            },
+        }
+    }
+}
+
+impl JsonRpcError {
+    fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 // --- Core Logic ---
 
 async fn handle_request(
@@ -202,14 +230,8 @@ async fn handle_request(
             ]
         })),
         "tools/call" => {
-            let params = params.ok_or(JsonRpcError {
-                code: -32602,
-                message: "Missing params".to_string(),
-            })?;
-            let name = params["name"].as_str().ok_or(JsonRpcError {
-                code: -32602,
-                message: "Missing tool name".to_string(),
-            })?;
+            let params = params.ok_or(JsonRpcError::new(-32602, "Missing params"))?;
+            let name = params["name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
             let args = &params["arguments"];
 
             match name {
@@ -218,10 +240,7 @@ async fn handle_request(
                         client
                             .get_all_cubes_list_lite()
                             .await
-                            .map_err(|e| JsonRpcError {
-                                code: -32000,
-                                message: e.to_string(),
-                            })?;
+                            .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     // Truncate for brevity in LLM context? No, user wants list.
                     // But the list is HUGE (thousands). We should probably warn or truncate.
                     // For now, let's verify size.
@@ -241,38 +260,23 @@ async fn handle_request(
                     }
                 }
                 "get_metadata" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing pid".to_string(),
-                    })?;
+                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     Ok(
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
                     )
                 }
                 "get_cube_dimensions" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing pid".to_string(),
-                    })?;
+                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
 
-                    let metadata = resp.object.ok_or(JsonRpcError {
-                        code: -32000,
-                        message: "Table not found".to_string(),
-                    })?;
+                    let metadata = resp.object.ok_or(JsonRpcError::new(-32000, "Table not found"))?;
 
                     let member_query_lower =
                         args["member_query"].as_str().map(|s| s.to_lowercase());
@@ -302,18 +306,12 @@ async fn handle_request(
                     )
                 }
                 "search_cubes" => {
-                    let query = args["query"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing query".to_string(),
-                    })?;
+                    let query = args["query"].as_str().ok_or(JsonRpcError::new(-32602, "Missing query"))?;
                     let resp =
                         client
                             .get_all_cubes_list_lite()
                             .await
-                            .map_err(|e| JsonRpcError {
-                                code: -32000,
-                                message: e.to_string(),
-                            })?;
+                            .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
 
                     let all_cubes = resp.object.unwrap_or_default();
                     let terms: Vec<String> =
@@ -340,10 +338,7 @@ async fn handle_request(
                     }
                 }
                 "fetch_data_by_vector" => {
-                    let vectors_val = args["vectors"].as_array().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing vectors array".to_string(),
-                    })?;
+                    let vectors_val = args["vectors"].as_array().ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
                     let vectors: Vec<String> = vectors_val
                         .iter()
                         .map(|v| {
@@ -360,10 +355,7 @@ async fn handle_request(
                     let resp = client
                         .get_data_from_vectors(vectors, periods)
                         .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     if resp.status != "SUCCESS" {
                         Ok(
                             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
@@ -381,14 +373,8 @@ async fn handle_request(
                     }
                 }
                 "fetch_data_by_coords" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing pid".to_string(),
-                    })?;
-                    let coords_val = args["coords"].as_array().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing coords array".to_string(),
-                    })?;
+                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let coords_val = args["coords"].as_array().ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
                     let coords: Vec<String> = coords_val
                         .iter()
                         .map(|v| {
@@ -405,10 +391,7 @@ async fn handle_request(
                     let resp = client
                         .get_data_from_coords(pid, coords, periods)
                         .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     if resp.status != "SUCCESS" {
                         Ok(
                             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
@@ -426,19 +409,13 @@ async fn handle_request(
                     }
                 }
                 "search_cubes_by_dimension" => {
-                    let dim_name = args["dimension_name"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing dimension_name".to_string(),
-                    })?;
+                    let dim_name = args["dimension_name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
                     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
                     let results = client
                         .find_cubes_by_dimension(dim_name, limit)
                         .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
 
                     // Format results nicely
                     // Result: Vec<(pid, title, matching_dims)>
@@ -458,10 +435,7 @@ async fn handle_request(
                     )
                 }
                 "fetch_data_snippet" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError {
-                        code: -32602,
-                        message: "Missing pid".to_string(),
-                    })?;
+                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
                     let geo = args["geo"].as_str();
                     let recent_months = args["recent_months"].as_u64(); // Option<u64>
@@ -480,15 +454,9 @@ async fn handle_request(
                                 polars::prelude::JsonWriter::new(&mut buf)
                                     .with_json_format(polars::prelude::JsonFormat::Json)
                                     .finish(&mut polars_df)
-                                    .map_err(|e| JsonRpcError {
-                                        code: -32000,
-                                        message: format!("Serialization error: {}", e),
-                                    })?;
+                                    .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
 
-                                let output = String::from_utf8(buf).map_err(|e| JsonRpcError {
-                                    code: -32000,
-                                    message: format!("UTF-8 error: {}", e),
-                                })?;
+                                let output = String::from_utf8(buf).map_err(|e| JsonRpcError::new(-32000, format!("UTF-8 error: {}", e)))?;
                                 return Ok(
                                     json!({ "content": [{ "type": "text", "text": output }] }),
                                 );
@@ -504,17 +472,11 @@ async fn handle_request(
                         client
                             .fetch_full_table(pid)
                             .await
-                            .map_err(|e| JsonRpcError {
-                                code: -32000,
-                                message: e.to_string(),
-                            })?;
+                            .map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
 
                     // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
                     if let Some(g) = geo {
-                        df_wrapper = df_wrapper.filter_geo(g).map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        df_wrapper = df_wrapper.filter_geo(g).map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     }
 
                     // Apply generic filters (Fuzzy Match enabled in wrapper)
@@ -522,10 +484,7 @@ async fn handle_request(
                         for (col, val) in f {
                             if let Some(v_str) = val.as_str() {
                                 df_wrapper = df_wrapper.filter_column(col, v_str).map_err(|e| {
-                                    JsonRpcError {
-                                        code: -32000,
-                                        message: e.to_string(),
-                                    }
+                                    JsonRpcError::new(-32000, e.to_string())
                                 })?;
                             }
                         }
@@ -534,26 +493,14 @@ async fn handle_request(
                     // Get recent periods (returns ALL rows for N most recent dates)
                     if let Some(n) = recent_months {
                         df_wrapper = df_wrapper.take_recent_periods(n as usize).map_err(|e| {
-                            JsonRpcError {
-                                code: -32000,
-                                message: e.to_string(),
-                            }
+                            JsonRpcError::new(-32000, e.to_string())
                         })?;
                         // Sort descending so most recent data appears first
-                        df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     } else {
                         // Default: sort descending (most recent first) then take N rows
-                        df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
-                        df_wrapper = df_wrapper.take_n(rows).map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                        })?;
+                        df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
+                        df_wrapper = df_wrapper.take_n(rows).map_err(|e| JsonRpcError::new(-32000, e.to_string()))?;
                     }
 
                     // Format output as JSON
@@ -562,21 +509,12 @@ async fn handle_request(
                     polars::prelude::JsonWriter::new(&mut buf)
                         .with_json_format(polars::prelude::JsonFormat::Json)
                         .finish(&mut df)
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: format!("Serialization error: {}", e),
-                        })?;
+                        .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
 
-                    let output = String::from_utf8(buf).map_err(|e| JsonRpcError {
-                        code: -32000,
-                        message: format!("UTF-8 error: {}", e),
-                    })?;
+                    let output = String::from_utf8(buf).map_err(|e| JsonRpcError::new(-32000, format!("UTF-8 error: {}", e)))?;
                     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
                 }
-                _ => Err(JsonRpcError {
-                    code: -32601,
-                    message: "Method not found".to_string(),
-                }),
+                _ => Err(JsonRpcError::new(-32601, "Method not found")),
             }
         }
         "initialize" => Ok(json!({
@@ -591,10 +529,7 @@ async fn handle_request(
         })),
         "notifications/initialized" => Ok(json!({})),
         "ping" => Ok(json!({})),
-        _ => Err(JsonRpcError {
-            code: -32601,
-            message: "Method not found".to_string(),
-        }),
+        _ => Err(JsonRpcError::new(-32601, "Method not found")),
     }
 }
 
@@ -635,20 +570,7 @@ async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyh
                 let result = handle_request(client.clone(), &req.method, req.params).await;
 
                 if !is_notification {
-                    let resp = match result {
-                        Ok(res) => JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            result: Some(res),
-                            error: None,
-                            id: req.id,
-                        },
-                        Err(err) => JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            result: None,
-                            error: Some(err),
-                            id: req.id,
-                        },
-                    };
+                    let resp = JsonRpcResponse::from_result(result, req.id);
                     match serde_json::to_string(&resp) {
                         Ok(json_str) => println!("{}", json_str),
                         Err(e) => error!("Failed to serialize response: {}", e),
@@ -861,22 +783,7 @@ async fn handle_http_message(
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let result = handle_request(state.client.clone(), &req.method, req.params).await;
-
-    let resp = match result {
-        Ok(res) => JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            result: Some(res),
-            error: None,
-            id: req.id,
-        },
-        Err(err) => JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            result: None,
-            error: Some(err),
-            id: req.id,
-        },
-    };
-
+    let resp = JsonRpcResponse::from_result(result, req.id);
     Json(resp).into_response()
 }
 
