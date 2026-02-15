@@ -31,6 +31,8 @@ use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
 };
 use tower_http::trace::TraceLayer;
+const BROADCAST_CHANNEL_CAPACITY: usize = 100;
+
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -790,10 +792,11 @@ async fn handle_register(
 
 async fn http_mode(
     port: u16,
-    args_api_key: Option<String>, // Legacy single key
+    legacy_api_key: Option<String>, // Legacy single key
     client: Arc<StatCanClient>,
 ) -> anyhow::Result<()> {
-    let (tx, _rx) = broadcast::channel(100);
+    // We drop the receiver immediately as we only need the sender to subscribe new clients
+    let (tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
 
     // Supabase Config
     let sb_url = std::env::var("SUPABASE_URL").ok();
@@ -816,7 +819,7 @@ async fn http_mode(
         sender: tx,
         supabase,
         use_supabase,
-        legacy_key: args_api_key,
+        legacy_key: legacy_api_key,
         auth_cache,
     };
 
@@ -1146,7 +1149,7 @@ mod tests {
         // Use real client since AppState requires concrete StatCanClient
         // This is safe because auth_middleware doesn't use the client.
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let (tx, _rx) = broadcast::channel(1);
+        let (tx, _) = broadcast::channel(1);
         let auth_cache = Arc::new(AuthCache::new(300));
 
         let state = AppState {
@@ -1194,7 +1197,7 @@ mod tests {
 
         // Use real client since AppState requires concrete StatCanClient
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let (tx, _rx) = broadcast::channel(1);
+        let (tx, _) = broadcast::channel(1);
 
         let auth_cache = Arc::new(AuthCache::new(300));
         let valid_key = "test-key";
