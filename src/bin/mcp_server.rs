@@ -132,20 +132,24 @@ impl JsonRpcError {
     }
 }
 
-// --- Core Logic ---
 
-fn log_and_map_error(e: StatCanError) -> JsonRpcError {
-    match &e {
-        StatCanError::TableNotFound => JsonRpcError::new(-32000, "Table not found"),
-        StatCanError::Api(msg) if msg == "Invalid PID format" || msg == "PID cannot be empty" => {
-            JsonRpcError::new(-32602, msg.clone())
-        }
-        _ => {
-            error!("Internal error: {:?}", e);
-            JsonRpcError::new(-32000, "Internal server error")
+impl From<StatCanError> for JsonRpcError {
+    fn from(e: StatCanError) -> Self {
+        match e {
+            StatCanError::TableNotFound => JsonRpcError::new(-32000, "Table not found"),
+            StatCanError::Api(ref msg) if msg == "Invalid PID format" || msg == "PID cannot be empty" => {
+                JsonRpcError::new(-32602, msg.clone())
+            }
+            e => {
+                error!("Internal error: {:?}", e);
+                JsonRpcError::new(-32000, "Internal server error")
+            }
         }
     }
 }
+
+// --- Core Logic ---
+
 
 async fn handle_request<C: StatCanClientTrait>(
     client: Arc<C>,
@@ -260,8 +264,7 @@ async fn handle_request<C: StatCanClientTrait>(
                 "list_cubes" => {
                     let resp = client
                         .get_all_cubes_list_lite()
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
                     // Truncate for brevity in LLM context? No, user wants list.
                     // But the list is HUGE (thousands). We should probably warn or truncate.
                     // For now, let's verify size.
@@ -286,8 +289,7 @@ async fn handle_request<C: StatCanClientTrait>(
                         .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
                     Ok(
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
                     )
@@ -298,8 +300,7 @@ async fn handle_request<C: StatCanClientTrait>(
                         .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
 
                     let metadata = resp
                         .object
@@ -338,8 +339,7 @@ async fn handle_request<C: StatCanClientTrait>(
                         .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
                     let resp = client
                         .get_all_cubes_list_lite()
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
 
                     let all_cubes = resp.object.unwrap_or_default();
                     let terms: Vec<String> =
@@ -384,8 +384,7 @@ async fn handle_request<C: StatCanClientTrait>(
 
                     let resp = client
                         .get_data_from_vectors(vectors, periods)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
                     if resp.status != "SUCCESS" {
                         Ok(
                             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
@@ -424,8 +423,7 @@ async fn handle_request<C: StatCanClientTrait>(
 
                     let resp = client
                         .get_data_from_coords(pid, coords, periods)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
                     if resp.status != "SUCCESS" {
                         Ok(
                             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
@@ -450,8 +448,7 @@ async fn handle_request<C: StatCanClientTrait>(
 
                     let results = client
                         .find_cubes_by_dimension(dim_name, limit)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
 
                     // Format results nicely
                     // Result: Vec<(pid, title, matching_dims)>
@@ -514,12 +511,11 @@ async fn handle_request<C: StatCanClientTrait>(
 
                     let mut df_wrapper = client
                         .fetch_full_table(pid)
-                        .await
-                        .map_err(log_and_map_error)?;
+                        .await?;
 
                     // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
                     if let Some(g) = geo {
-                        df_wrapper = df_wrapper.filter_geo(g).map_err(log_and_map_error)?;
+                        df_wrapper = df_wrapper.filter_geo(g)?;
                     }
 
                     // Apply generic filters (Fuzzy Match enabled in wrapper)
@@ -527,8 +523,7 @@ async fn handle_request<C: StatCanClientTrait>(
                         for (col, val) in f {
                             if let Some(v_str) = val.as_str() {
                                 df_wrapper = df_wrapper
-                                    .filter_column(col, v_str)
-                                    .map_err(log_and_map_error)?;
+                                    .filter_column(col, v_str)?;
                             }
                         }
                     }
@@ -536,14 +531,13 @@ async fn handle_request<C: StatCanClientTrait>(
                     // Get recent periods (returns ALL rows for N most recent dates)
                     if let Some(n) = recent_months {
                         df_wrapper = df_wrapper
-                            .take_recent_periods(n as usize)
-                            .map_err(log_and_map_error)?;
+                            .take_recent_periods(n as usize)?;
                         // Sort descending so most recent data appears first
-                        df_wrapper = df_wrapper.sort_date(true).map_err(log_and_map_error)?;
+                        df_wrapper = df_wrapper.sort_date(true)?;
                     } else {
                         // Default: sort descending (most recent first) then take N rows
-                        df_wrapper = df_wrapper.sort_date(true).map_err(log_and_map_error)?;
-                        df_wrapper = df_wrapper.take_n(rows).map_err(log_and_map_error)?;
+                        df_wrapper = df_wrapper.sort_date(true)?;
+                        df_wrapper = df_wrapper.take_n(rows)?;
                     }
 
                     // Format output as JSON
