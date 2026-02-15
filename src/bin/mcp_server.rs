@@ -26,7 +26,7 @@ use std::{
     io::BufRead,
     sync::{Arc, OnceLock},
 };
-use tokio::sync::broadcast;
+
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
 };
@@ -679,7 +679,6 @@ impl AuthCache {
 #[allow(dead_code)]
 struct AppState {
     client: Arc<StatCanClient>,
-    sender: broadcast::Sender<String>,
     supabase: Option<Arc<Postgrest>>,
     use_supabase: bool,
     legacy_key: Option<String>,
@@ -787,7 +786,6 @@ async fn http_mode(
     args_api_key: Option<String>, // Legacy single key
     client: Arc<StatCanClient>,
 ) -> anyhow::Result<()> {
-    let (tx, _rx) = broadcast::channel(100);
 
     // Supabase Config
     let sb_url = std::env::var("SUPABASE_URL").ok();
@@ -807,7 +805,6 @@ async fn http_mode(
 
     let state = AppState {
         client,
-        sender: tx,
         supabase,
         use_supabase,
         legacy_key: args_api_key,
@@ -916,34 +913,15 @@ async fn handle_http_message(
 }
 
 async fn sse_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.sender.subscribe();
-
     // 1. Send the endpoint event immediately so the client knows where to POST
     let endpoint_event = Event::default().event("endpoint").data("/mcp/messages");
 
-    // 2. Stream notifications/messages from the broadcast channel
-    let notification_stream = stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    // MCP notifications and responses over SSE use the 'message' event name
-                    return Some((Ok(Event::default().event("message").data(msg)), rx));
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // If we're lagging, just skip to the next message
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    // Channel closed, end the stream
-                    return None;
-                }
-            }
-        }
-    });
+    // 2. Keep the stream open
+    let pending = stream::pending::<Result<Event, Infallible>>();
 
-    let stream = stream::once(async { Ok(endpoint_event) }).chain(notification_stream);
+    let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
 
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
@@ -1140,12 +1118,10 @@ mod tests {
         // Use real client since AppState requires concrete StatCanClient
         // This is safe because auth_middleware doesn't use the client.
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let (tx, _rx) = broadcast::channel(1);
         let auth_cache = Arc::new(AuthCache::new(300));
 
         let state = AppState {
             client,
-            sender: tx,
             supabase: None,
             use_supabase: false,
             legacy_key: Some("secret-key".to_string()),
@@ -1188,7 +1164,6 @@ mod tests {
 
         // Use real client since AppState requires concrete StatCanClient
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let (tx, _rx) = broadcast::channel(1);
 
         let auth_cache = Arc::new(AuthCache::new(300));
         let valid_key = "test-key";
@@ -1201,7 +1176,6 @@ mod tests {
 
         let state = AppState {
             client,
-            sender: tx,
             supabase: None, // Missing client would cause panic if accessed
             use_supabase: true,
             legacy_key: None,
