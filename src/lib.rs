@@ -50,6 +50,19 @@ impl StatCanClient {
         Ok(Self { client })
     }
 
+    fn validate_pid(pid: &str) -> Result<()> {
+        if pid.is_empty() {
+            return Err(StatCanError::Api("PID cannot be empty".to_string()));
+        }
+        if !pid
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(StatCanError::Api("Invalid PID format".to_string()));
+        }
+        Ok(())
+    }
+
     /// Helper to safely parse API response, handling plain text or HTML errors
     async fn parse_statcan_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
         let status = resp.status();
@@ -98,6 +111,7 @@ impl StatCanClient {
     }
 
     pub async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getCubeMetadata", BASE_URL);
         let body_req = json!([{ "productId": pid }]);
         let resp = self.client.post(&url).json(&body_req).send().await?;
@@ -184,6 +198,7 @@ impl StatCanClient {
         coords: Vec<String>,
         periods: i32,
     ) -> Result<DataResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getDataFromCubePidCoordAndLatestNPeriods", BASE_URL);
 
         let payload: Vec<_> = coords
@@ -357,6 +372,7 @@ impl StatCanClient {
     }
 
     pub async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
+        Self::validate_pid(pid)?;
         // 1. Get Metadata to find dimensions and valid members
         let metadata = self.get_cube_metadata(pid).await?;
         let meta_obj = metadata
@@ -410,6 +426,7 @@ impl StatCanClient {
     }
 
     pub async fn get_full_cube_from_cube_pid(&self, pid: &str) -> Result<FullTableResponse> {
+        Self::validate_pid(pid)?;
         let url = format!("{}/getFullTableDownloadCSV/{}/en", BASE_URL, pid);
         let resp = self.client.get(&url).send().await?;
         // Note: Full table download returns metadata JSON, not data. Data is in the URL inside.
@@ -472,7 +489,7 @@ impl StatCanClient {
             Ok(())
         })
         .await
-        .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         // Cleanup ZIP
         let _ = tokio::fs::remove_file(zip_path).await;
@@ -481,6 +498,7 @@ impl StatCanClient {
     }
 
     pub async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
+        Self::validate_pid(pid)?;
         let csv_path = self.fetch_file_with_cache(pid).await?;
 
         // 4. Parse with Polars (Blocking to avoid stalling async runtime)
@@ -492,7 +510,7 @@ impl StatCanClient {
             Ok(df)
         })
         .await
-        .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         Ok(StatCanDataFrame::new(df))
     }
