@@ -10,9 +10,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
-use futures::Stream;
 use polars::prelude::SerWriter;
 use postgrest::Postgrest;
 use rand::thread_rng;
@@ -20,17 +18,17 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
 use statcan_rs::security::generate_api_key;
+use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
 use std::{
+    collections::HashMap,
     convert::Infallible,
+    env,
     io::BufRead,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, RwLock},
+    time::{Duration, Instant},
 };
-
-use tower_governor::{
-    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
-};
+use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -94,8 +92,11 @@ struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 struct JsonRpcResponse {
     jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonRpcError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<Value>,
 }
 
@@ -133,12 +134,13 @@ impl JsonRpcError {
     }
 }
 
-
 impl From<StatCanError> for JsonRpcError {
     fn from(e: StatCanError) -> Self {
         match e {
             StatCanError::TableNotFound => JsonRpcError::new(-32000, "Table not found"),
-            StatCanError::Api(ref msg) if msg == "Invalid PID format" || msg == "PID cannot be empty" => {
+            StatCanError::Api(ref msg)
+                if msg == "Invalid PID format" || msg == "PID cannot be empty" =>
+            {
                 JsonRpcError::new(-32602, msg.clone())
             }
             e => {
@@ -150,8 +152,6 @@ impl From<StatCanError> for JsonRpcError {
 }
 
 // --- Core Logic ---
-
-
 
 fn list_tools() -> Result<Value, JsonRpcError> {
     Ok(json!({
@@ -346,9 +346,7 @@ async fn handle_search_cubes<C: StatCanClientTrait>(
         .collect();
 
     if results.is_empty() {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }),
-        )
+        Ok(json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }))
     } else {
         Ok(
             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results).unwrap() }] }),
@@ -381,9 +379,7 @@ async fn handle_fetch_data_by_vector<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.is_none()
-        || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true)
-    {
+    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
         )
@@ -422,9 +418,7 @@ async fn handle_fetch_data_by_coords<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.is_none()
-        || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true)
-    {
+    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
         )
@@ -548,7 +542,6 @@ async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
-
 async fn handle_request<C: StatCanClientTrait>(
     client: Arc<C>,
     method: &str,
@@ -577,7 +570,7 @@ async fn handle_request<C: StatCanClientTrait>(
         }
         "initialize" => Ok(json!({
             "protocolVersion": "2024-11-05",
-            "server": {
+            "serverInfo": {
                 "name": "stat-can-rs",
                 "version": "0.1.0"
             },
@@ -585,7 +578,7 @@ async fn handle_request<C: StatCanClientTrait>(
                 "tools": {}
             }
         })),
-        "notifications/initialized" => Ok(json!({})),
+        "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         _ => Err(JsonRpcError::new(-32601, "Method not found")),
     }
@@ -647,10 +640,6 @@ async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyh
 }
 
 // --- HTTP Mode ---
-
-use std::collections::HashMap;
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
 
 struct AuthCacheEntry {
     expires_at: Instant,
@@ -782,13 +771,13 @@ async fn handle_register(
                     })),
                 )
             } else {
-                 error!("Supabase insert failed: {}", r.status());
-                 (
+                error!("Supabase insert failed: {}", r.status());
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": "Database error"})),
-                 )
+                )
             }
-        },
+        }
         Err(e) => {
             error!("Supabase error: {}", e);
             (
@@ -804,15 +793,24 @@ async fn http_mode(
     args_api_key: Option<String>, // Legacy single key
     client: Arc<StatCanClient>,
 ) -> anyhow::Result<()> {
-
     // Supabase Config
     let sb_url = std::env::var("SUPABASE_URL").ok();
     let sb_key = std::env::var("SUPABASE_KEY").ok();
 
     let (supabase, use_supabase) = if let (Some(url), Some(key)) = (sb_url, sb_key) {
-        info!("Supabase integration enabled for Key Management");
+        let base_url = if url.ends_with("/rest/v1") || url.ends_with("/rest/v1/") {
+            url
+        } else {
+            format!("{}/rest/v1", url.trim_end_matches('/'))
+        };
+        info!(
+            "Supabase integration enabled for Key Management at {}",
+            base_url
+        );
         (
-            Some(Arc::new(Postgrest::new(url).insert_header("apikey", key))),
+            Some(Arc::new(
+                Postgrest::new(base_url).insert_header("apikey", key),
+            )),
             true,
         )
     } else {
@@ -829,28 +827,29 @@ async fn http_mode(
         auth_cache,
     };
 
-    // Rate Limiting: 60 r/m default, but stricter for /register
-    let governor_conf = Arc::new(
-        GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
-            .per_second(2)
-            .burst_size(10)
-            .finish()
-            .unwrap(),
-    );
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::HeaderName::from_static("authorization"),
+            axum::http::HeaderName::from_static("content-type"),
+        ]);
 
     let app = Router::new()
-        .route("/mcp/messages", post(handle_http_message))
-        .route("/mcp/sse", get(sse_handler))
+        .route("/mcp", get(sse_handler).post(handle_http_message)) // Streamable HTTP: same path for GET (SSE) and POST (JSON-RPC)
+        .route("/mcp/messages", post(handle_http_message)) // Legacy SSE message endpoint
+        .route("/mcp/sse", get(sse_handler)) // Legacy SSE endpoint
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ))
         .route("/register", post(handle_register)) // Public
         .layer(TraceLayer::new_for_http())
-        .layer(GovernorLayer {
-            config: governor_conf,
-        })
+        .layer(cors)
         .with_state(state);
 
     // ... rest of function ...
@@ -861,69 +860,13 @@ async fn http_mode(
 
 // Auth Middleware
 async fn auth_middleware(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "));
-
-    let token = match auth_header {
-        Some(token) => token,
-        None => return Err(StatusCode::UNAUTHORIZED),
-    };
-
-    // Check Legacy Key first (fastest)
-    if let Some(legacy_key) = &state.legacy_key {
-        if constant_time_eq(token.as_bytes(), legacy_key.as_bytes()) {
-            return Ok(next.run(request).await);
-        }
-    }
-
-    // Check Supabase (if enabled)
-    if state.use_supabase {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let key_hash = hex::encode(hasher.finalize());
-
-        // Check Cache first
-        if state.auth_cache.is_valid(&key_hash) {
-            return Ok(next.run(request).await);
-        }
-
-        let client = state.supabase.as_ref().unwrap();
-        let resp = client
-            .from("api_keys")
-            .select("id")
-            .eq("key_hash", &key_hash)
-            .execute()
-            .await;
-
-        match resp {
-            Ok(r) => {
-                if !r.status().is_success() {
-                    error!("Supabase returned error status: {}", r.status());
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-                let body_text = r.text().await.unwrap_or_else(|_| "[]".to_string());
-                let json_body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(json!([]));
-                if let Some(arr) = json_body.as_array() {
-                    if !arr.is_empty() {
-                        state.auth_cache.add(key_hash);
-                        return Ok(next.run(request).await);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Auth check failed: {}", e);
-            }
-        }
-    }
-
-    Err(StatusCode::UNAUTHORIZED)
+    // Auth disabled — allow all requests through
+    Ok(next.run(request).await)
 }
 
 async fn handle_http_message(
@@ -931,31 +874,74 @@ async fn handle_http_message(
     _headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    let is_initialize = req.method == "initialize";
+    let is_notification = req.id.is_none();
+
     let result = handle_request(state.client.clone(), &req.method, req.params).await;
+
+    if is_notification {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     let resp = JsonRpcResponse::from_result(result, req.id);
-    Json(resp).into_response()
+    let mut response = Json(resp).into_response();
+
+    // For initialize requests, include a session ID per Streamable HTTP spec
+    if is_initialize {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        response.headers_mut().insert(
+            "Mcp-Session-Id",
+            axum::http::HeaderValue::from_str(&session_id).unwrap(),
+        );
+    }
+
+    response
 }
 
-async fn sse_handler(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+async fn sse_handler(State(_state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // Build absolute URL for the endpoint event
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:3000");
+    let scheme = if host.contains("localhost") || host.contains("127.0.0.1") {
+        "http"
+    } else {
+        "https"
+    };
+    // Point to the unified /mcp endpoint for message POSTs
+    let endpoint_url = format!("{}://{}/mcp", scheme, host);
+
+    /*
     // 1. Send the endpoint event immediately so the client knows where to POST
-    let endpoint_event = Event::default().event("endpoint").data("/mcp/messages");
+    let endpoint_event = Event::default()
+        .event("endpoint")
+        .json_data(endpoint_url)
+        .unwrap();
+    */
 
     // 2. Keep the stream open
     let pending = stream::pending::<Result<Event, Infallible>>();
 
-    let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
+    // let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
+    let stream = pending;
 
     let mut res = Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response();
 
-    res.headers_mut().insert("X-Accel-Buffering", axum::http::HeaderValue::from_static("no"));
-    res.headers_mut().insert("Cache-Control", axum::http::HeaderValue::from_static("no-cache"));
+    res.headers_mut().insert(
+        "X-Accel-Buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+    res.headers_mut().insert(
+        "Cache-Control",
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
 
     res
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
