@@ -189,7 +189,10 @@ impl StatCanClient {
             Ok(json) => Ok(json),
             Err(_) => {
                 // 2. Parsing failed. Inspect raw text.
-                if text.trim().starts_with("D") && text.contains("not found") {
+                let text_lower = text.trim().to_lowercase();
+                if text_lower.contains("not found")
+                    || text_lower.contains("database")
+                    || text_lower.contains("unavailable") {
                     // Likely "Data not found" or "Database not available"
                     return Err(StatCanError::Api(format!(
                         "StatCan API Error: {}",
@@ -668,7 +671,7 @@ mod tests {
         let val = res.unwrap();
         assert_eq!(val["status"], "SUCCESS");
 
-        // 2. Data not found (starts with D, contains "not found")
+        // 2. Data not found (case insensitive, contains "not found")
         let not_found_text = "Data not found for this cube";
         let res =
             StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
@@ -696,6 +699,16 @@ mod tests {
         assert!(res.is_err());
         match res.unwrap_err() {
             StatCanError::Api(msg) => assert!(msg.contains("Invalid JSON response")),
+            _ => panic!("Expected Api error"),
+        }
+
+        // 5. Data not found (does not start with D)
+        let not_found_text_2 = "Error: Data not found";
+        let res =
+            StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text_2);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StatCanError::Api(msg) => assert!(msg.contains("StatCan API Error: Error: Data not found")),
             _ => panic!("Expected Api error"),
         }
     }
