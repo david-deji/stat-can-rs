@@ -425,16 +425,14 @@ impl StatCanClient {
         Ok(data)
     }
 
-    fn get_cache_path(&self, pid: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push("statcan");
-        std::fs::create_dir_all(&path).unwrap_or(()); // Ensure dir exists
-        path.push(format!("{}.csv", pid));
-        path
+    fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join("statcan");
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{}.csv", pid)))
     }
 
     async fn fetch_file_with_cache(&self, pid: &str) -> Result<std::path::PathBuf> {
-        let csv_path = self.get_cache_path(pid);
+        let csv_path = self.get_cache_path(pid)?;
         if csv_path.exists() {
             info!("Cache hit for PID: {}", pid);
             return Ok(csv_path);
@@ -495,5 +493,28 @@ impl StatCanClient {
         .map_err(|e| StatCanError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(StatCanDataFrame::new(df))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_cache_path_behavior() {
+        let client = StatCanClient::new().unwrap();
+        let pid = "12345";
+        let path = client.get_cache_path(pid).unwrap();
+
+        // Check path structure
+        // path contains "statcan" and ends with "12345.csv"
+        let s = path.to_string_lossy();
+        assert!(s.contains("statcan"));
+        assert!(s.ends_with("12345.csv"));
+
+        // Check directory creation
+        let dir = path.parent().unwrap();
+        assert!(dir.exists());
+        assert!(dir.is_dir());
     }
 }
