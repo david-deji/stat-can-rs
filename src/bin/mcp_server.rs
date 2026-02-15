@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
-use std::{convert::Infallible, io::BufRead, sync::{Arc, OnceLock}};
+use std::{
+    convert::Infallible,
+    io::BufRead,
+    sync::{Arc, OnceLock},
+};
 use tokio::sync::broadcast;
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
@@ -247,16 +251,17 @@ async fn handle_request<C: StatCanClientTrait>(
         })),
         "tools/call" => {
             let params = params.ok_or(JsonRpcError::new(-32602, "Missing params"))?;
-            let name = params["name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
+            let name = params["name"]
+                .as_str()
+                .ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
             let args = &params["arguments"];
 
             match name {
                 "list_cubes" => {
-                    let resp =
-                        client
-                            .get_all_cubes_list_lite()
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let resp = client
+                        .get_all_cubes_list_lite()
+                        .await
+                        .map_err(log_and_map_error)?;
                     // Truncate for brevity in LLM context? No, user wants list.
                     // But the list is HUGE (thousands). We should probably warn or truncate.
                     // For now, let's verify size.
@@ -276,7 +281,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "get_metadata" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
@@ -286,13 +293,17 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "get_cube_dimensions" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
                         .map_err(log_and_map_error)?;
 
-                    let metadata = resp.object.ok_or(JsonRpcError::new(-32000, "Table not found"))?;
+                    let metadata = resp
+                        .object
+                        .ok_or(JsonRpcError::new(-32000, "Table not found"))?;
 
                     let member_query_lower =
                         args["member_query"].as_str().map(|s| s.to_lowercase());
@@ -322,12 +333,13 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "search_cubes" => {
-                    let query = args["query"].as_str().ok_or(JsonRpcError::new(-32602, "Missing query"))?;
-                    let resp =
-                        client
-                            .get_all_cubes_list_lite()
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let query = args["query"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+                    let resp = client
+                        .get_all_cubes_list_lite()
+                        .await
+                        .map_err(log_and_map_error)?;
 
                     let all_cubes = resp.object.unwrap_or_default();
                     let terms: Vec<String> =
@@ -354,7 +366,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "fetch_data_by_vector" => {
-                    let vectors_val = args["vectors"].as_array().ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
+                    let vectors_val = args["vectors"]
+                        .as_array()
+                        .ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
                     let vectors: Vec<String> = vectors_val
                         .iter()
                         .map(|v| {
@@ -389,8 +403,12 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "fetch_data_by_coords" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
-                    let coords_val = args["coords"].as_array().ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let coords_val = args["coords"]
+                        .as_array()
+                        .ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
                     let coords: Vec<String> = coords_val
                         .iter()
                         .map(|v| {
@@ -425,7 +443,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "search_cubes_by_dimension" => {
-                    let dim_name = args["dimension_name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
+                    let dim_name = args["dimension_name"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
                     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
                     let results = client
@@ -451,7 +471,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "fetch_data_snippet" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
                     let geo = args["geo"].as_str();
                     let recent_months = args["recent_months"].as_u64(); // Option<u64>
@@ -490,11 +512,10 @@ async fn handle_request<C: StatCanClientTrait>(
                         );
                     }
 
-                    let mut df_wrapper =
-                        client
-                            .fetch_full_table(pid)
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let mut df_wrapper = client
+                        .fetch_full_table(pid)
+                        .await
+                        .map_err(log_and_map_error)?;
 
                     // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
                     if let Some(g) = geo {
@@ -505,14 +526,18 @@ async fn handle_request<C: StatCanClientTrait>(
                     if let Some(f) = filters {
                         for (col, val) in f {
                             if let Some(v_str) = val.as_str() {
-                                df_wrapper = df_wrapper.filter_column(col, v_str).map_err(log_and_map_error)?;
+                                df_wrapper = df_wrapper
+                                    .filter_column(col, v_str)
+                                    .map_err(log_and_map_error)?;
                             }
                         }
                     }
 
                     // Get recent periods (returns ALL rows for N most recent dates)
                     if let Some(n) = recent_months {
-                        df_wrapper = df_wrapper.take_recent_periods(n as usize).map_err(log_and_map_error)?;
+                        df_wrapper = df_wrapper
+                            .take_recent_periods(n as usize)
+                            .map_err(log_and_map_error)?;
                         // Sort descending so most recent data appears first
                         df_wrapper = df_wrapper.sort_date(true).map_err(log_and_map_error)?;
                     } else {
@@ -614,6 +639,48 @@ async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyh
 
 // --- HTTP Mode ---
 
+use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+
+struct AuthCacheEntry {
+    expires_at: Instant,
+}
+
+struct AuthCache {
+    entries: RwLock<HashMap<String, AuthCacheEntry>>,
+    ttl: Duration,
+}
+
+impl AuthCache {
+    fn new(ttl_secs: u64) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(ttl_secs),
+        }
+    }
+
+    fn is_valid(&self, key_hash: &str) -> bool {
+        let map = self.entries.read().unwrap();
+        if let Some(entry) = map.get(key_hash) {
+            if entry.expires_at > Instant::now() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn add(&self, key_hash: String) {
+        let mut map = self.entries.write().unwrap();
+        map.insert(
+            key_hash,
+            AuthCacheEntry {
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct AppState {
@@ -622,6 +689,7 @@ struct AppState {
     supabase: Option<Arc<Postgrest>>,
     use_supabase: bool,
     legacy_key: Option<String>,
+    auth_cache: Arc<AuthCache>,
 }
 
 static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -741,12 +809,15 @@ async fn http_mode(
         (None, false)
     };
 
+    let auth_cache = Arc::new(AuthCache::new(300));
+
     let state = AppState {
         client,
         sender: tx,
         supabase,
         use_supabase,
         legacy_key: args_api_key,
+        auth_cache,
     };
 
     // Rate Limiting: 60 r/m default, but stricter for /register
@@ -809,11 +880,16 @@ async fn auth_middleware(
         hasher.update(token.as_bytes());
         let key_hash = hex::encode(hasher.finalize());
 
+        // Check Cache first
+        if state.auth_cache.is_valid(&key_hash) {
+            return Ok(next.run(request).await);
+        }
+
         let client = state.supabase.as_ref().unwrap();
         let resp = client
             .from("api_keys")
             .select("id")
-            .eq("key_hash", key_hash)
+            .eq("key_hash", &key_hash)
             .execute()
             .await;
 
@@ -822,6 +898,7 @@ async fn auth_middleware(
                 let body = r.text().await.unwrap_or_else(|_| "[]".to_string());
                 // If body is not empty array "[]", key exists
                 if body != "[]" {
+                    state.auth_cache.add(key_hash);
                     return Ok(next.run(request).await);
                 }
             }
@@ -850,9 +927,7 @@ async fn sse_handler(
     let rx = state.sender.subscribe();
 
     // 1. Send the endpoint event immediately so the client knows where to POST
-    let endpoint_event = Event::default()
-        .event("endpoint")
-        .data("/mcp/messages");
+    let endpoint_event = Event::default().event("endpoint").data("/mcp/messages");
 
     // 2. Stream notifications/messages from the broadcast channel
     let notification_stream = stream::unfold(rx, |mut rx| async move {
@@ -1072,12 +1147,15 @@ mod tests {
         // This is safe because auth_middleware doesn't use the client.
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
         let (tx, _rx) = broadcast::channel(1);
+        let auth_cache = Arc::new(AuthCache::new(300));
+
         let state = AppState {
             client,
             sender: tx,
             supabase: None,
             use_supabase: false,
             legacy_key: Some("secret-key".to_string()),
+            auth_cache,
         };
 
         let app = Router::new()
@@ -1101,5 +1179,54 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_cache_hit() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+            middleware,
+            routing::get,
+            Router,
+        };
+        use tower::ServiceExt;
+
+        // Use real client since AppState requires concrete StatCanClient
+        let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
+        let (tx, _rx) = broadcast::channel(1);
+
+        let auth_cache = Arc::new(AuthCache::new(300));
+        let valid_key = "test-key";
+        let mut hasher = Sha256::new();
+        hasher.update(valid_key.as_bytes());
+        let key_hash = hex::encode(hasher.finalize());
+
+        // Populate Cache Manually
+        auth_cache.add(key_hash);
+
+        let state = AppState {
+            client,
+            sender: tx,
+            supabase: None, // Missing client would cause panic if accessed
+            use_supabase: true,
+            legacy_key: None,
+            auth_cache,
+        };
+
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .route_layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        // 1. Valid Key (in Cache)
+        let req = Request::builder()
+            .uri("/")
+            .header("Authorization", format!("Bearer {}", valid_key))
+            .body(Body::empty())
+            .unwrap();
+
+        // This should SUCCEED because cache is hit. If cache missed, it would hit supabase logic and panic on unwrap().
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
