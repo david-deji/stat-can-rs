@@ -991,7 +991,7 @@ mod tests {
                     cube_title_en: "Mocked Cube".to_string(),
                     dimension: vec![Dimension {
                         dimension_name_en: "Geography".to_string(),
-                        dimension_position_id: 1,
+                        position_id: 1,
                         member: vec![Member {
                             member_id: 1,
                             member_name_en: "Canada".to_string(),

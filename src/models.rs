@@ -52,7 +52,8 @@ pub struct CubeMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct Dimension {
     pub dimension_name_en: String,
-    pub dimension_position_id: i32,
+    #[serde(rename = "dimensionPositionId")]
+    pub position_id: i32,
     pub member: Vec<Member>,
 }
 
