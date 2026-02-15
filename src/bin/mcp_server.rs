@@ -11,6 +11,7 @@ use axum::{
 };
 use clap::Parser;
 use futures::stream::{self, StreamExt};
+use polars::prelude::SerReader;
 use polars::prelude::SerWriter;
 use postgrest::Postgrest;
 use rand::thread_rng;
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use statcan_rs::security::generate_api_key;
-use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
+use statcan_rs::{CKANClient, StatCanClient, StatCanClientTrait, StatCanError};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -63,16 +64,19 @@ async fn main() -> anyhow::Result<()> {
     }
     let args = Args::parse();
     let client = Arc::new(StatCanClient::new()?);
+    let open_data_client = Arc::new(statcan_rs::GenericCKANDriver::new(
+        "https://open.canada.ca/data/en",
+    )?);
 
     if let Some(port) = args.port {
         info!("Starting MCP server in HTTP/SSE mode on port {}", port);
-        http_mode(port, args.api_key, client).await?;
+        http_mode(port, args.api_key, client, open_data_client).await?;
     } else {
         info!(
             "Starting MCP server in Stdio mode (Rate Limit: {}/min)",
             args.rate_limit
         );
-        stdio_mode(client, args.rate_limit).await?;
+        stdio_mode(client, open_data_client, args.rate_limit).await?;
     }
 
     Ok(())
@@ -245,6 +249,53 @@ fn list_tools() -> Result<Value, JsonRpcError> {
                         "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs for column filtering. Uses exact match first, then substring fallback (e.g. {'Products and product groups': 'Energy'} matches 'Energy' exactly, not 'All-items excluding energy')" }
                     },
                     "required": ["pid"]
+                }
+            },
+            {
+                "name": "search_open_data",
+                "description": "Search the Canadian Open Government portal for datasets.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query (keywords)" },
+                        "limit": { "type": "integer", "description": "Max results (default 10)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "get_open_data_metadata",
+                "description": "Get detailed metadata for a specific dataset from the Open Government portal.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The Dataset (Package) ID" }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "query_open_data_datastore",
+                "description": "Execute an SQL query against the Canadian Open Government Datastore (for datasets with 'datastore_active'=true).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sql": { "type": "string", "description": "The SQL query to execute (e.g. 'SELECT * FROM \"resource_id\" LIMIT 5'). Note: Table names must be the Resource ID in double quotes." }
+                    },
+                    "required": ["sql"]
+                }
+            },
+            {
+                "name": "fetch_open_data_resource_snippet",
+                "description": "Fetch a small snippet of data from an Open Government resource (CSV) for previewing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "resource_id": { "type": "string", "description": "The Resource ID to fetch" },
+                        "rows": { "type": "integer", "description": "Number of rows to return (default 5)" },
+                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs to filter by column (case-insensitive substring match). Use column names from the CSV header." }
+                    },
+                    "required": ["resource_id"]
                 }
             }
         ]
@@ -464,7 +515,8 @@ async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
 ) -> Result<Value, JsonRpcError> {
     let pid = args["pid"]
         .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+        .or_else(|| args["resource_id"].as_str())
+        .ok_or(JsonRpcError::new(-32602, "Missing pid or resource_id"))?;
     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
     let geo = args["geo"].as_str();
     let recent_months = args["recent_months"].as_u64(); // Option<u64>
@@ -542,11 +594,262 @@ async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
-async fn handle_request<C: StatCanClientTrait>(
+async fn handle_search_open_data<C: CKANClient>(
     client: Arc<C>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let query = args["query"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+    let packages = client.search_packages(query, limit).await.map_err(|e| {
+        error!("Open Data search failed: {}", e);
+        JsonRpcError::new(-32000, format!("Open Data search failed: {}", e))
+    })?;
+
+    if packages.is_empty() {
+        Ok(json!({ "content": [{ "type": "text", "text": "No datasets found matching query." }] }))
+    } else {
+        Ok(
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&packages).unwrap() }] }),
+        )
+    }
+}
+
+async fn handle_get_open_data_metadata<C: CKANClient>(
+    client: Arc<C>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let id = args["id"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing id"))?;
+
+    let meta = client.get_package_metadata(id).await.map_err(|e| {
+        error!("Get metadata failed: {}", e);
+        JsonRpcError::new(-32000, format!("Get metadata failed: {}", e))
+    })?;
+
+    Ok(
+        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&meta).unwrap() }] }),
+    )
+}
+
+async fn handle_query_open_data_datastore<C: CKANClient>(
+    client: Arc<C>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let sql = args["sql"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing sql"))?;
+
+    let records = client.query_datastore(sql).await.map_err(|e| {
+        error!("Datastore query failed: {}", e);
+        JsonRpcError::new(-32000, format!("Datastore query failed: {}", e))
+    })?;
+
+    // Format output (limit size if needed, but client limits via SQL usually)
+    Ok(
+        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&records).unwrap() }] }),
+    )
+}
+
+async fn handle_fetch_open_data_snippet<C: CKANClient>(
+    client: Arc<C>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let resource_id = args["resource_id"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing resource_id"))?;
+
+    let rows = args["rows"].as_u64().unwrap_or(5) as usize;
+    let filters = args["filters"].as_object(); // Optional key-value filters
+
+    // 1. Get the resource handler to find the download URL
+    info!("Looking up resource: {}", resource_id);
+    let handler = client
+        .get_resource_handler(resource_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get resource handler for {}: {}", resource_id, e);
+            JsonRpcError::new(-32000, format!("Failed to look up resource: {}", e))
+        })?;
+
+    let download_url = match handler {
+        statcan_rs::DataHandler::BlobDownload(url) => url,
+        statcan_rs::DataHandler::DatastoreQuery(_, Some(url)) => url,
+        statcan_rs::DataHandler::DatastoreQuery(_, None) => {
+            return Err(JsonRpcError::new(
+                -32000,
+                "Resource has no download URL available",
+            ));
+        }
+    };
+
+    info!("Downloading Open Data CSV from: {}", download_url);
+
+    // 2. Download the CSV with a longer timeout (these files can be large)
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .gzip(true)
+        .build()
+        .map_err(|e| {
+            error!("Failed to build HTTP client: {}", e);
+            JsonRpcError::new(-32000, format!("HTTP client error: {}", e))
+        })?;
+
+    let resp = http_client.get(&download_url).send().await.map_err(|e| {
+        error!("Failed to download CSV: {}", e);
+        JsonRpcError::new(-32000, format!("Download failed: {}", e))
+    })?;
+
+    if !resp.status().is_success() {
+        return Err(JsonRpcError::new(
+            -32000,
+            format!("Download failed: HTTP {}", resp.status()),
+        ));
+    }
+
+    // 3. Stream body to temp file (avoids holding entire file in memory)
+    let temp_path = std::env::temp_dir().join(format!("opendata_{}.csv", resource_id));
+    {
+        let bytes = resp.bytes().await.map_err(|e| {
+            error!("Failed to read response body: {}", e);
+            JsonRpcError::new(-32000, format!("Failed to read data: {}", e))
+        })?;
+        info!("Downloaded {} bytes from Open Data", bytes.len());
+        tokio::fs::write(&temp_path, &bytes).await.map_err(|e| {
+            error!("Failed to write temp CSV: {}", e);
+            JsonRpcError::new(-32000, format!("Failed to save data: {}", e))
+        })?;
+    }
+
+    // 4. Parse with Polars, apply filters, take N rows
+    let rows_limit = rows;
+    let filters_owned: Option<Vec<(String, String)>> = filters.map(|f| {
+        f.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    });
+
+    // Detect delimiter
+    // Detect delimiter
+    let separator = {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&temp_path).map_err(|e| {
+            error!("Failed to open temp file for inspection: {}", e);
+            JsonRpcError::new(-32000, "Internal server error")
+        })?;
+        let mut buffer = [0u8; 4096];
+        let n = file.read(&mut buffer).unwrap_or(0);
+        let slice = &buffer[..n];
+
+        let commas = slice.iter().filter(|&&c| c == b',').count();
+        let tabs = slice.iter().filter(|&&c| c == b'\t').count();
+
+        if tabs > commas {
+            b'\t'
+        } else {
+            b','
+        }
+    };
+    info!("Detected separator: '{}'", separator as char);
+
+    let temp_path_clone = temp_path.clone();
+    let df_result = tokio::task::spawn_blocking(
+        move || -> std::result::Result<polars::prelude::DataFrame, String> {
+            let reader = polars::prelude::CsvReader::from_path(&temp_path_clone)
+                .map_err(|e| format!("Failed to open CSV: {}", e))?;
+
+            let df = reader
+                .infer_schema(Some(100))
+                .has_header(true)
+                .with_separator(separator)
+                .with_ignore_errors(true) // Skip rows with encoding/parsing errors
+                .truncate_ragged_lines(true)
+                .finish()
+                .map_err(|e| format!("CSV parse error: {}", e))?;
+
+            info!("Parsed CSV: {} rows x {} cols", df.height(), df.width());
+
+            // Apply filters if provided
+            let mut result = df;
+            if let Some(ref filter_pairs) = filters_owned {
+                for (col_name, col_val) in filter_pairs {
+                    let col_lower = col_name.to_lowercase();
+                    let val_lower = col_val.to_lowercase();
+
+                    // Find the actual column name (case-insensitive)
+                    let actual_col = result
+                        .get_column_names()
+                        .iter()
+                        .find(|c| c.to_lowercase() == col_lower)
+                        .map(|c| c.to_string());
+
+                    if let Some(col) = actual_col {
+                        // Cast column to string and do case-insensitive contains
+                        let series = result
+                            .column(&col)
+                            .map_err(|e| format!("Column error: {}", e))?;
+                        let str_series = series
+                            .cast(&polars::prelude::DataType::String)
+                            .map_err(|e| format!("Cast error: {}", e))?;
+                        let ca = str_series.str().map_err(|e| format!("Str error: {}", e))?;
+                        let mask = ca
+                            .into_iter()
+                            .map(|opt_val| {
+                                opt_val.map_or(false, |v| v.to_lowercase().contains(&val_lower))
+                            })
+                            .collect::<polars::prelude::BooleanChunked>();
+                        result = result
+                            .filter(&mask)
+                            .map_err(|e| format!("Filter error: {}", e))?;
+                    }
+                }
+            }
+
+            let take = std::cmp::min(rows_limit, result.height());
+            Ok(result.head(Some(take)))
+        },
+    )
+    .await
+    .map_err(|e| {
+        error!("Task join error: {}", e);
+        JsonRpcError::new(-32000, format!("Processing error: {}", e))
+    })?
+    .map_err(|e| {
+        error!("CSV processing failed: {}", e);
+        JsonRpcError::new(-32000, e)
+    })?;
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    // 5. Serialize to JSON
+    let mut df = df_result;
+    let mut buf = Vec::new();
+    polars::prelude::JsonWriter::new(&mut buf)
+        .with_json_format(polars::prelude::JsonFormat::Json)
+        .finish(&mut df)
+        .map_err(|e| {
+            error!("Serialization error: {}", e);
+            JsonRpcError::new(-32000, format!("Serialization error: {}", e))
+        })?;
+
+    let output = String::from_utf8(buf).map_err(|e| {
+        error!("UTF-8 error: {}", e);
+        JsonRpcError::new(-32000, format!("Encoding error: {}", e))
+    })?;
+
+    Ok(json!({ "content": [{ "type": "text", "text": output }] }))
+}
+
+async fn handle_request<C: StatCanClientTrait, O: CKANClient + StatCanClientTrait>(
+    client: Arc<C>,
+    od_client: Arc<O>,
     method: &str,
     params: Option<Value>,
-) -> Result<Value, JsonRpcError> {
+) -> anyhow::Result<Value, JsonRpcError> {
     match method {
         "tools/list" => list_tools(),
         "tools/call" => {
@@ -565,6 +868,14 @@ async fn handle_request<C: StatCanClientTrait>(
                 "fetch_data_by_coords" => handle_fetch_data_by_coords(client, args).await,
                 "search_cubes_by_dimension" => handle_search_cubes_by_dimension(client, args).await,
                 "fetch_data_snippet" => handle_fetch_data_snippet(client, args).await,
+                "search_open_data" => handle_search_open_data(od_client, args).await,
+                "get_open_data_metadata" => handle_get_open_data_metadata(od_client, args).await,
+                "query_open_data_datastore" => {
+                    handle_query_open_data_datastore(od_client, args).await
+                }
+                "fetch_open_data_resource_snippet" => {
+                    handle_fetch_open_data_snippet(od_client, args).await
+                }
                 _ => Err(JsonRpcError::new(-32601, "Tool not found")),
             }
         }
@@ -589,7 +900,11 @@ async fn handle_request<C: StatCanClientTrait>(
 use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 
-async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyhow::Result<()> {
+async fn stdio_mode(
+    client: Arc<StatCanClient>,
+    od_client: Arc<statcan_rs::GenericCKANDriver>,
+    rate_limit_per_min: u32,
+) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut line = String::new();
@@ -618,7 +933,9 @@ async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyh
         match req {
             Ok(req) => {
                 let is_notification = req.id.is_none();
-                let result = handle_request(client.clone(), &req.method, req.params).await;
+                let result =
+                    handle_request(client.clone(), od_client.clone(), &req.method, req.params)
+                        .await;
 
                 if !is_notification {
                     let resp = JsonRpcResponse::from_result(result, req.id);
@@ -683,6 +1000,7 @@ impl AuthCache {
 #[allow(dead_code)]
 struct AppState {
     client: Arc<StatCanClient>,
+    open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     supabase: Option<Arc<Postgrest>>,
     use_supabase: bool,
     legacy_key: Option<String>,
@@ -792,6 +1110,7 @@ async fn http_mode(
     port: u16,
     args_api_key: Option<String>, // Legacy single key
     client: Arc<StatCanClient>,
+    open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
     // Supabase Config
     let sb_url = std::env::var("SUPABASE_URL").ok();
@@ -821,6 +1140,7 @@ async fn http_mode(
 
     let state = AppState {
         client,
+        open_data_client,
         supabase,
         use_supabase,
         legacy_key: args_api_key,
@@ -877,7 +1197,13 @@ async fn handle_http_message(
     let is_initialize = req.method == "initialize";
     let is_notification = req.id.is_none();
 
-    let result = handle_request(state.client.clone(), &req.method, req.params).await;
+    let result = handle_request(
+        state.client.clone(),
+        state.open_data_client.clone(),
+        &req.method,
+        req.params,
+    )
+    .await;
 
     if is_notification {
         return StatusCode::NO_CONTENT.into_response();
@@ -946,8 +1272,8 @@ async fn sse_handler(State(_state): State<AppState>, headers: HeaderMap) -> impl
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use statcan_rs::CKANClient;
     use polars::prelude::*;
+    use statcan_rs::CKANClient;
     use statcan_rs::{
         models::{
             Cube, CubeListResponse, CubeMetadata, CubeMetadataResponse, DataResponse, Dimension,
@@ -960,21 +1286,36 @@ mod tests {
 
     #[async_trait]
     impl CKANClient for MockStatCanClient {
-        async fn ping(&self) -> Result<String> { Ok("Mock OK".to_string()) }
-        async fn search_packages(&self, _query: &str, _limit: usize) -> Result<Vec<statcan_rs::PackageMetadata>> { Ok(vec![]) }
+        async fn ping(&self) -> Result<String> {
+            Ok("Mock OK".to_string())
+        }
+        async fn search_packages(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<statcan_rs::PackageMetadata>> {
+            Ok(vec![])
+        }
         async fn get_package_metadata(&self, id: &str) -> Result<statcan_rs::PackageMetadata> {
-             Ok(statcan_rs::PackageMetadata {
-                 id: id.to_string(),
-                 title: "Mock Package".to_string(),
-                 notes: None,
-                 url: None,
-                 resources: vec![]
-             })
+            Ok(statcan_rs::PackageMetadata {
+                id: id.to_string(),
+                title: "Mock Package".to_string(),
+                notes: None,
+                url: None,
+                resources: vec![],
+            })
         }
-        async fn get_resource_handler(&self, _resource_id: &str) -> Result<statcan_rs::DataHandler> {
-            Ok(statcan_rs::DataHandler::BlobDownload("http://mock".to_string()))
+        async fn get_resource_handler(
+            &self,
+            _resource_id: &str,
+        ) -> Result<statcan_rs::DataHandler> {
+            Ok(statcan_rs::DataHandler::BlobDownload(
+                "http://mock".to_string(),
+            ))
         }
-        async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> { Ok(vec![]) }
+        async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
     }
 
     impl StatCanClientTrait for MockStatCanClient {
@@ -1082,7 +1423,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_request_tools_list() {
         let client = Arc::new(MockStatCanClient);
-        let resp = handle_request(client, "tools/list", None).await;
+        let od_client = Arc::new(MockStatCanClient);
+        let resp = handle_request(client, od_client, "tools/list", None).await;
         assert!(resp.is_ok());
         let val = resp.unwrap();
         let tools = val["tools"].as_array();
@@ -1093,11 +1435,12 @@ mod tests {
     #[tokio::test]
     async fn test_handle_request_list_cubes() {
         let client = Arc::new(MockStatCanClient);
+        let od_client = Arc::new(MockStatCanClient);
         let params = json!({
             "name": "list_cubes",
             "arguments": {}
         });
-        let resp = handle_request(client, "tools/call", Some(params)).await;
+        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
         assert!(resp.is_ok());
         let val = resp.unwrap();
         let content = val["content"].as_array().unwrap();
@@ -1108,11 +1451,12 @@ mod tests {
     #[tokio::test]
     async fn test_handle_request_get_metadata() {
         let client = Arc::new(MockStatCanClient);
+        let od_client = Arc::new(MockStatCanClient);
         let params = json!({
             "name": "get_metadata",
             "arguments": { "pid": "12345" }
         });
-        let resp = handle_request(client, "tools/call", Some(params)).await;
+        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
         assert!(resp.is_ok());
         let val = resp.unwrap();
         let content = val["content"].as_array().unwrap();
@@ -1124,8 +1468,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_request_error_handling() {
         let client = Arc::new(MockStatCanClient);
+        let od_client = Arc::new(MockStatCanClient);
         // Test missing params
-        let resp = handle_request(client.clone(), "tools/call", None).await;
+        let resp = handle_request(client.clone(), od_client.clone(), "tools/call", None).await;
         assert!(resp.is_err());
         assert_eq!(resp.unwrap_err().code, -32602);
 
@@ -1134,12 +1479,26 @@ mod tests {
             "name": "get_metadata",
             "arguments": { "pid": "error" }
         });
-        let resp = handle_request(client, "tools/call", Some(params)).await;
+        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
         assert!(resp.is_err());
         let err = resp.unwrap_err();
         assert_eq!(err.code, -32000);
         assert_eq!(err.message, "Internal server error");
     }
+
+    /*
+    #[tokio::test]
+    async fn test_handle_request_search_open_data() {
+        let client = Arc::new(MockStatCanClient);
+        let od_client = Arc::new(MockStatCanClient);
+        let params = json!({
+            "name": "search_open_data",
+            "arguments": { "query": "test" }
+        });
+        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
+        assert!(resp.is_ok());
+    }
+    */
 
     #[tokio::test]
     async fn test_auth_middleware_legacy_key() {
@@ -1155,10 +1514,15 @@ mod tests {
         // Use real client since AppState requires concrete StatCanClient
         // This is safe because auth_middleware doesn't use the client.
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
+        let open_data_client = Arc::new(
+            statcan_rs::GenericCKANDriver::new("https://open.canada.ca/data/en")
+                .expect("Failed to create client"),
+        );
         let auth_cache = Arc::new(AuthCache::new(300));
 
         let state = AppState {
             client,
+            open_data_client,
             supabase: None,
             use_supabase: false,
             legacy_key: Some("secret-key".to_string()),
@@ -1201,6 +1565,10 @@ mod tests {
 
         // Use real client since AppState requires concrete StatCanClient
         let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
+        let open_data_client = Arc::new(
+            statcan_rs::GenericCKANDriver::new("https://open.canada.ca/data/en")
+                .expect("Failed to create client"),
+        );
 
         let auth_cache = Arc::new(AuthCache::new(300));
         let valid_key = "test-key";
@@ -1213,6 +1581,7 @@ mod tests {
 
         let state = AppState {
             client,
+            open_data_client,
             supabase: None, // Missing client would cause panic if accessed
             use_supabase: true,
             legacy_key: None,

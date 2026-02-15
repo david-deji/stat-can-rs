@@ -1,21 +1,21 @@
 pub mod models;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod wrapper;
 pub mod security;
+pub mod wrapper;
 
 pub use wrapper::StatCanDataFrame;
 
 use crate::models::{
-    Cube, CubeListResponse, CubeMetadataResponse, DataPoint, DataResponse, FullTableResponse,
-    VectorDataResponse, Dimension, CubeMetadata,
+    Cube, CubeListResponse, CubeMetadata, CubeMetadataResponse, DataPoint, DataResponse, Dimension,
+    FullTableResponse, VectorDataResponse,
 };
 use ::zip::ZipArchive;
-use polars::prelude::*;
 use async_trait::async_trait;
+use polars::prelude::*;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use serde::{Serialize, Deserialize};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,7 +122,6 @@ impl StatCanClientTrait for StatCanDriver {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageMetadata {
     pub id: String,
@@ -142,8 +141,9 @@ pub struct ResourceMetadata {
 
 #[derive(Debug, Clone)]
 pub enum DataHandler {
-    DatastoreQuery(String), // Resource ID
-    BlobDownload(String),   // URL
+    /// Resource ID and optional download URL
+    DatastoreQuery(String, Option<String>),
+    BlobDownload(String), // URL
 }
 
 #[async_trait]
@@ -230,7 +230,8 @@ impl StatCanDriver {
                 let text_lower = text.trim().to_lowercase();
                 if text_lower.contains("not found")
                     || text_lower.contains("database")
-                    || text_lower.contains("unavailable") {
+                    || text_lower.contains("unavailable")
+                {
                     // Likely "Data not found" or "Database not available"
                     return Err(StatCanError::Api(format!(
                         "StatCan API Error: {}",
@@ -662,7 +663,6 @@ impl StatCanDriver {
     }
 }
 
-
 #[async_trait]
 impl CKANClient for StatCanDriver {
     async fn ping(&self) -> Result<String> {
@@ -670,9 +670,9 @@ impl CKANClient for StatCanDriver {
         let url = format!("{}/getAllCubesListLite", BASE_URL);
         let resp = self.client.get(&url).send().await?;
         if resp.status().is_success() {
-             Ok("StatCan WDS OK".to_string())
+            Ok("StatCan WDS OK".to_string())
         } else {
-             Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
+            Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
         }
     }
 
@@ -680,7 +680,10 @@ impl CKANClient for StatCanDriver {
         let mut packages = Vec::new();
 
         // 1. Try to find cubes by dimension name if query looks like a dimension.
-        let results = self.find_cubes_by_dimension(query, limit).await.unwrap_or_default();
+        let results = self
+            .find_cubes_by_dimension(query, limit)
+            .await
+            .unwrap_or_default();
         for (pid, title, _) in results {
             packages.push(PackageMetadata {
                 id: pid.clone(),
@@ -693,17 +696,17 @@ impl CKANClient for StatCanDriver {
 
         // If no results and query looks like PID, try fetching metadata directly
         if packages.is_empty() && regex::Regex::new(r"^\d+$").unwrap().is_match(query) {
-             if let Ok(meta) = self.get_cube_metadata(query).await {
-                 if let Some(obj) = meta.object {
-                     packages.push(PackageMetadata {
-                         id: obj.product_id.clone(),
-                         title: obj.cube_title_en,
-                         notes: None,
-                         url: None,
-                         resources: vec![],
-                     });
-                 }
-             }
+            if let Ok(meta) = self.get_cube_metadata(query).await {
+                if let Some(obj) = meta.object {
+                    packages.push(PackageMetadata {
+                        id: obj.product_id.clone(),
+                        title: obj.cube_title_en,
+                        notes: None,
+                        url: None,
+                        resources: vec![],
+                    });
+                }
+            }
         }
 
         Ok(packages)
@@ -738,11 +741,11 @@ impl CKANClient for StatCanDriver {
     }
 
     async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
-        Err(StatCanError::Api("Datastore SQL queries not supported by StatCan WDS".to_string()))
+        Err(StatCanError::Api(
+            "Datastore SQL queries not supported by StatCan WDS".to_string(),
+        ))
     }
 }
-
-
 
 #[derive(Clone)]
 pub struct GenericCKANDriver {
@@ -769,38 +772,48 @@ impl CKANClient for GenericCKANDriver {
         let url = format!("{}/api/3/action/site_read", self.base_url);
         let resp = self.client.get(&url).send().await?;
         if resp.status().is_success() {
-             Ok("CKAN API OK".to_string())
+            Ok("CKAN API OK".to_string())
         } else {
-             // Fallback: Try package_search with limit 0
-             let fallback_url = format!("{}/api/3/action/package_search?rows=0", self.base_url);
-             let fallback_resp = self.client.get(&fallback_url).send().await?;
-             if fallback_resp.status().is_success() {
-                 Ok("CKAN API OK (Fallback)".to_string())
-             } else {
-                 Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
-             }
+            // Fallback: Try package_search with limit 0
+            let fallback_url = format!("{}/api/3/action/package_search?rows=0", self.base_url);
+            let fallback_resp = self.client.get(&fallback_url).send().await?;
+            if fallback_resp.status().is_success() {
+                Ok("CKAN API OK (Fallback)".to_string())
+            } else {
+                Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
+            }
         }
     }
 
     async fn search_packages(&self, query: &str, limit: usize) -> Result<Vec<PackageMetadata>> {
         let url = format!("{}/api/3/action/package_search", self.base_url);
-        let resp = self.client.get(&url)
+        let resp = self
+            .client
+            .get(&url)
             .query(&[("q", query), ("rows", &limit.to_string())])
             .send()
             .await?;
 
         if !resp.status().is_success() {
-            return Err(StatCanError::Api(format!("Search failed: {}", resp.status())));
+            return Err(StatCanError::Api(format!(
+                "Search failed: {}",
+                resp.status()
+            )));
         }
 
         let body: serde_json::Value = resp.json().await?;
 
         if let Some(false) = body["success"].as_bool() {
-             return Err(StatCanError::Api("CKAN API Error: search unsuccessful".to_string()));
+            return Err(StatCanError::Api(
+                "CKAN API Error: search unsuccessful".to_string(),
+            ));
         }
 
-        let results = body["result"]["results"].as_array()
-            .ok_or(StatCanError::Api("Invalid response structure: results missing".to_string()))?;
+        let results = body["result"]["results"]
+            .as_array()
+            .ok_or(StatCanError::Api(
+                "Invalid response structure: results missing".to_string(),
+            ))?;
 
         let mut packages = Vec::new();
         for pkg in results {
@@ -835,18 +848,20 @@ impl CKANClient for GenericCKANDriver {
 
     async fn get_package_metadata(&self, id: &str) -> Result<PackageMetadata> {
         let url = format!("{}/api/3/action/package_show", self.base_url);
-        let resp = self.client.get(&url)
-            .query(&[("id", id)])
-            .send()
-            .await?;
+        let resp = self.client.get(&url).query(&[("id", id)]).send().await?;
 
         if !resp.status().is_success() {
-             return Err(StatCanError::Api(format!("Get package failed: {}", resp.status())));
+            return Err(StatCanError::Api(format!(
+                "Get package failed: {}",
+                resp.status()
+            )));
         }
 
         let body: serde_json::Value = resp.json().await?;
         if let Some(false) = body["success"].as_bool() {
-             return Err(StatCanError::Api("CKAN API Error: package_show unsuccessful".to_string()));
+            return Err(StatCanError::Api(
+                "CKAN API Error: package_show unsuccessful".to_string(),
+            ));
         }
 
         let pkg = &body["result"];
@@ -880,26 +895,39 @@ impl CKANClient for GenericCKANDriver {
         // We need to fetch resource details to see if datastore is active
         // Typically, we use resource_show
         let url = format!("{}/api/3/action/resource_show", self.base_url);
-        let resp = self.client.get(&url)
+        let resp = self
+            .client
+            .get(&url)
             .query(&[("id", resource_id)])
             .send()
             .await?;
 
         if !resp.status().is_success() {
-             return Err(StatCanError::Api(format!("Get resource failed: {}", resp.status())));
+            return Err(StatCanError::Api(format!(
+                "Get resource failed: {}",
+                resp.status()
+            )));
         }
 
         let body: serde_json::Value = resp.json().await?;
         if let Some(false) = body["success"].as_bool() {
-             return Err(StatCanError::Api("CKAN API Error: resource_show unsuccessful".to_string()));
+            return Err(StatCanError::Api(
+                "CKAN API Error: resource_show unsuccessful".to_string(),
+            ));
         }
 
         let res = &body["result"];
         let datastore_active = res["datastore_active"].as_bool().unwrap_or(false);
-        let download_url = res["url"].as_str().ok_or(StatCanError::Api("Resource has no URL".to_string()))?.to_string();
+        let download_url = res["url"]
+            .as_str()
+            .ok_or(StatCanError::Api("Resource has no URL".to_string()))?
+            .to_string();
 
         if datastore_active {
-            Ok(DataHandler::DatastoreQuery(resource_id.to_string()))
+            Ok(DataHandler::DatastoreQuery(
+                resource_id.to_string(),
+                Some(download_url),
+            ))
         } else {
             Ok(DataHandler::BlobDownload(download_url))
         }
@@ -908,37 +936,58 @@ impl CKANClient for GenericCKANDriver {
     async fn query_datastore(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
         let url = format!("{}/api/3/action/datastore_search_sql", self.base_url);
 
-        // CKAN's datastore_search_sql usually takes 'sql' as a query param
-        let resp = self.client.get(&url)
-            .query(&[("sql", sql)])
-            .send()
-            .await?;
+        // The Open Data Canada API expects the SQL query in the 'sql' parameter.
+        // It seems the previous error "Action name not known: datastore_search_sql"
+        // might indicate that this specific action is restricted or not enabled on this CKAN instance,
+        // OR that the URL construction was slightly off.
+        // However, standard CKAN uses /datastore_search_sql.
+        // Let's try to be robust and also check if we need to encode it differently.
+
+        let resp = self.client.get(&url).query(&[("sql", sql)]).send().await?;
 
         if !resp.status().is_success() {
-             // Try to parse error message
-             let status = resp.status();
-             let error_text = resp.text().await.unwrap_or_default();
-             return Err(StatCanError::Api(format!("SQL query failed ({}): {}", status, error_text)));
+            // Try to parse error message
+            let status = resp.status();
+            let error_text = resp.text().await.unwrap_or_default();
+            // Pass back the raw error for debugging if parsing fails
+            return Err(StatCanError::Api(format!(
+                "SQL query failed ({}): {}",
+                status, error_text
+            )));
         }
 
         let body: serde_json::Value = resp.json().await?;
+
         if let Some(false) = body["success"].as_bool() {
-             let error_msg = body["error"].as_str()
+            let error_msg = body["error"]
+                .as_str()
                 .or_else(|| body["error"]["message"].as_str())
                 .unwrap_or("Unknown error");
-             return Err(StatCanError::Api(format!("CKAN API Error: {}", error_msg)));
+            // Check specifically for the "Action name not known" error
+            if error_msg.contains("Action name not known") {
+                return Err(StatCanError::Api(
+                    "Datastore SQL search is not enabled on this server.".to_string(),
+                ));
+            }
+            return Err(StatCanError::Api(format!("CKAN API Error: {}", error_msg)));
         }
 
-        let records = body["result"]["records"].as_array()
-            .ok_or(StatCanError::Api("Invalid response: records missing".to_string()))?;
+        // success is true, but we need to check if 'result' exists and has 'records'
+        let records = body["result"]["records"]
+            .as_array()
+            .ok_or(StatCanError::Api(
+                "Invalid response: records missing".to_string(),
+            ))?;
 
         Ok(records.clone())
     }
 }
 
-
-
-pub async fn download_and_extract_file(client: &Client, url: &str, pid: &str) -> Result<std::path::PathBuf> {
+pub async fn download_and_extract_file(
+    client: &Client,
+    url: &str,
+    pid: &str,
+) -> Result<std::path::PathBuf> {
     let mut path = std::env::temp_dir();
     path.push("statcan");
     tokio::fs::create_dir_all(&path).await.unwrap_or(());
@@ -948,46 +997,75 @@ pub async fn download_and_extract_file(client: &Client, url: &str, pid: &str) ->
         return Ok(csv_path);
     }
 
-    let mut zip_resp = client.get(url).send().await?;
-    if !zip_resp.status().is_success() {
-         return Err(StatCanError::Api(format!("Download failed: {}", zip_resp.status())));
+    let mut resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(StatCanError::Api(format!(
+            "Download failed: {}",
+            resp.status()
+        )));
     }
 
-    let zip_path = std::env::temp_dir().join(format!("statcan/{}.zip", pid));
-    let mut zip_file = tokio::fs::File::create(&zip_path).await?;
-    while let Some(chunk) = zip_resp.chunk().await? {
-        use tokio::io::AsyncWriteExt;
-        zip_file.write_all(&chunk).await?;
+    // Determine if it's a zip based on Content-Type or URL extension
+    let is_zip = {
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        url.to_lowercase().ends_with(".zip") || content_type.contains("zip")
+    };
+
+    if is_zip {
+        let zip_path = std::env::temp_dir().join(format!("statcan/{}.zip", pid));
+        let mut zip_file = tokio::fs::File::create(&zip_path).await?;
+        while let Some(chunk) = resp.chunk().await? {
+            use tokio::io::AsyncWriteExt;
+            zip_file.write_all(&chunk).await?;
+        }
+        zip_file.sync_all().await?;
+        drop(zip_file); // Close file
+
+        let zip_path_clone = zip_path.clone();
+        let csv_path_clone = csv_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = std::fs::File::open(&zip_path_clone)?;
+            let mut archive = ZipArchive::new(file)?;
+            // Usually the CSV file inside has the same name as the PID or similar.
+            // We'll just take the first file.
+            let mut csv_file = archive.by_index(0)?;
+            let mut out_file = std::fs::File::create(&csv_path_clone)?;
+            std::io::copy(&mut csv_file, &mut out_file)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
+
+        let _ = tokio::fs::remove_file(zip_path).await;
+        Ok(csv_path)
+    } else {
+        // Assume direct CSV download
+        let mut out_file = tokio::fs::File::create(&csv_path).await?;
+        while let Some(chunk) = resp.chunk().await? {
+            use tokio::io::AsyncWriteExt;
+            out_file.write_all(&chunk).await?;
+        }
+        out_file.sync_all().await?;
+        Ok(csv_path)
     }
-    zip_file.sync_all().await?;
-    drop(zip_file); // Close file
-
-    let zip_path_clone = zip_path.clone();
-    let csv_path_clone = csv_path.clone();
-
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let file = std::fs::File::open(&zip_path_clone)?;
-        let mut archive = ZipArchive::new(file)?;
-        let mut csv_file = archive.by_index(0)?;
-        let mut out_file = std::fs::File::create(&csv_path_clone)?;
-        std::io::copy(&mut csv_file, &mut out_file)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
-
-    let _ = tokio::fs::remove_file(zip_path).await;
-    Ok(csv_path)
 }
 
 impl StatCanClientTrait for GenericCKANDriver {
     async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
         let packages = self.search_packages("*", 100).await?;
-        let cubes: Vec<Cube> = packages.into_iter().map(|p| Cube {
-            product_id: p.id.clone(),
-            cube_title_en: p.title,
-            cube_pid: Some(p.id),
-        }).collect();
+        let cubes: Vec<Cube> = packages
+            .into_iter()
+            .map(|p| Cube {
+                product_id: p.id.clone(),
+                cube_title_en: p.title,
+                cube_pid: Some(p.id),
+            })
+            .collect();
         Ok(CubeListResponse {
             status: "SUCCESS".to_string(),
             object: Some(cubes),
@@ -1014,17 +1092,37 @@ impl StatCanClientTrait for GenericCKANDriver {
         })
     }
 
-    async fn find_cubes_by_dimension(&self, dim_query: &str, limit: usize) -> Result<Vec<(String, String, String)>> {
+    async fn find_cubes_by_dimension(
+        &self,
+        dim_query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         let packages = self.search_packages(dim_query, limit).await?;
-        Ok(packages.into_iter().map(|p| (p.id, p.title, dim_query.to_string())).collect())
+        Ok(packages
+            .into_iter()
+            .map(|p| (p.id, p.title, dim_query.to_string()))
+            .collect())
     }
 
-    async fn get_data_from_vectors(&self, _vectors: Vec<String>, _periods: i32) -> Result<DataResponse> {
-        Err(StatCanError::Api("Vector data not supported by generic CKAN driver".to_string()))
+    async fn get_data_from_vectors(
+        &self,
+        _vectors: Vec<String>,
+        _periods: i32,
+    ) -> Result<DataResponse> {
+        Err(StatCanError::Api(
+            "Vector data not supported by generic CKAN driver".to_string(),
+        ))
     }
 
-    async fn get_data_from_coords(&self, _pid: &str, _coords: Vec<String>, _periods: i32) -> Result<DataResponse> {
-        Err(StatCanError::Api("Coordinate data not supported by generic CKAN driver".to_string()))
+    async fn get_data_from_coords(
+        &self,
+        _pid: &str,
+        _coords: Vec<String>,
+        _periods: i32,
+    ) -> Result<DataResponse> {
+        Err(StatCanError::Api(
+            "Coordinate data not supported by generic CKAN driver".to_string(),
+        ))
     }
 
     async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
@@ -1038,8 +1136,14 @@ impl StatCanClientTrait for GenericCKANDriver {
         let handler = self.get_resource_handler(pid).await?;
 
         let url = match handler {
-             DataHandler::BlobDownload(u) => u,
-             DataHandler::DatastoreQuery(_) => return Err(StatCanError::Api("Cannot fetch full table from Datastore query yet".to_string())),
+            DataHandler::BlobDownload(u) => u,
+            DataHandler::DatastoreQuery(_, Some(u)) => u,
+            DataHandler::DatastoreQuery(_, None) => {
+                return Err(StatCanError::Api(
+                    "Cannot fetch full table from Datastore query: no download URL available"
+                        .to_string(),
+                ))
+            }
         };
 
         // 2. Download
@@ -1059,7 +1163,6 @@ impl StatCanClientTrait for GenericCKANDriver {
         Ok(StatCanDataFrame::new(df))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1145,7 +1248,9 @@ mod tests {
             StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text_2);
         assert!(res.is_err());
         match res.unwrap_err() {
-            StatCanError::Api(msg) => assert!(msg.contains("StatCan API Error: Error: Data not found")),
+            StatCanError::Api(msg) => {
+                assert!(msg.contains("StatCan API Error: Error: Data not found"))
+            }
             _ => panic!("Expected Api error"),
         }
     }
