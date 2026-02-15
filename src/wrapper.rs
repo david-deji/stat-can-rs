@@ -550,4 +550,13 @@ mod tests {
         // Substring match
         assert_eq!(wrapper.resolve_column_name("alu").unwrap(), "Value");
     }
+
+    #[test]
+    fn test_inspect_column() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        assert!(wrapper.inspect_column("GEO").is_ok());
+        assert!(wrapper.inspect_column("geo").is_ok()); // Fuzzy match
+        assert!(wrapper.inspect_column("NonExistent").is_err());
+    }
 }
