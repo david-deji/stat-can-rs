@@ -772,13 +772,23 @@ async fn handle_register(
         .await;
 
     match resp {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(json!(RegisterResponse {
-                api_key,
-                message: "Store this key safely. It will not be shown again.".to_string()
-            })),
-        ),
+        Ok(r) => {
+            if r.status().is_success() {
+                (
+                    StatusCode::OK,
+                    Json(json!(RegisterResponse {
+                        api_key,
+                        message: "Store this key safely. It will not be shown again.".to_string()
+                    })),
+                )
+            } else {
+                 error!("Supabase insert failed: {}", r.status());
+                 (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Database error"})),
+                 )
+            }
+        },
         Err(e) => {
             error!("Supabase error: {}", e);
             (
@@ -894,11 +904,17 @@ async fn auth_middleware(
 
         match resp {
             Ok(r) => {
-                let body = r.text().await.unwrap_or_else(|_| "[]".to_string());
-                // If body is not empty array "[]", key exists
-                if body != "[]" {
-                    state.auth_cache.add(key_hash);
-                    return Ok(next.run(request).await);
+                if !r.status().is_success() {
+                    error!("Supabase returned error status: {}", r.status());
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                let body_text = r.text().await.unwrap_or_else(|_| "[]".to_string());
+                let json_body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(json!([]));
+                if let Some(arr) = json_body.as_array() {
+                    if !arr.is_empty() {
+                        state.auth_cache.add(key_hash);
+                        return Ok(next.run(request).await);
+                    }
                 }
             }
             Err(e) => {
@@ -922,7 +938,7 @@ async fn handle_http_message(
 
 async fn sse_handler(
     State(_state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     // 1. Send the endpoint event immediately so the client knows where to POST
     let endpoint_event = Event::default().event("endpoint").data("/mcp/messages");
 
@@ -931,9 +947,15 @@ async fn sse_handler(
 
     let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
 
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-}
+    let mut res = Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response();
 
+    res.headers_mut().insert("X-Accel-Buffering", axum::http::HeaderValue::from_static("no"));
+    res.headers_mut().insert("Cache-Control", axum::http::HeaderValue::from_static("no-cache"));
+
+    res
+}
 #[cfg(test)]
 mod tests {
     use super::*;
