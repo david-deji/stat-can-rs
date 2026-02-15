@@ -13,6 +13,7 @@ use ::zip::ZipArchive;
 use polars::prelude::*;
 use reqwest::Client;
 use serde_json::json;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -50,6 +51,77 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
         }
     }
     padded_string
+}
+
+pub trait StatCanClientTrait: Send + Sync {
+    fn get_all_cubes_list_lite(
+        &self,
+    ) -> impl Future<Output = Result<CubeListResponse>> + Send;
+    fn get_cube_metadata(
+        &self,
+        pid: &str,
+    ) -> impl Future<Output = Result<CubeMetadataResponse>> + Send;
+    fn find_cubes_by_dimension(
+        &self,
+        dim_query: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<(String, String, String)>>> + Send;
+    fn get_data_from_vectors(
+        &self,
+        vectors: Vec<String>,
+        periods: i32,
+    ) -> impl Future<Output = Result<DataResponse>> + Send;
+    fn get_data_from_coords(
+        &self,
+        pid: &str,
+        coords: Vec<String>,
+        periods: i32,
+    ) -> impl Future<Output = Result<DataResponse>> + Send;
+    fn fetch_fast_snippet(
+        &self,
+        pid: &str,
+    ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
+    fn fetch_full_table(
+        &self,
+        pid: &str,
+    ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
+}
+
+impl StatCanClientTrait for StatCanClient {
+    async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
+        self.get_all_cubes_list_lite().await
+    }
+    async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
+        self.get_cube_metadata(pid).await
+    }
+    async fn find_cubes_by_dimension(
+        &self,
+        dim_query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        self.find_cubes_by_dimension(dim_query, limit).await
+    }
+    async fn get_data_from_vectors(
+        &self,
+        vectors: Vec<String>,
+        periods: i32,
+    ) -> Result<DataResponse> {
+        self.get_data_from_vectors(vectors, periods).await
+    }
+    async fn get_data_from_coords(
+        &self,
+        pid: &str,
+        coords: Vec<String>,
+        periods: i32,
+    ) -> Result<DataResponse> {
+        self.get_data_from_coords(pid, coords, periods).await
+    }
+    async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
+        self.fetch_fast_snippet(pid).await
+    }
+    async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
+        self.fetch_full_table(pid).await
+    }
 }
 
 pub struct StatCanClient {
