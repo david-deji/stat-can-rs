@@ -13,8 +13,10 @@ use ::zip::ZipArchive;
 use polars::prelude::*;
 use reqwest::Client;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 const BASE_URL: &str = "https://www150.statcan.gc.ca/t1/wds/rest";
@@ -39,6 +41,7 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub struct StatCanClient {
     client: Client,
+    cubes_cache: Arc<RwLock<Option<Vec<Cube>>>>,
 }
 
 impl StatCanClient {
@@ -47,7 +50,10 @@ impl StatCanClient {
             .timeout(Duration::from_secs(30))
             .gzip(true)
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            cubes_cache: Arc::new(RwLock::new(None)),
+        })
     }
 
     /// Helper to safely parse API response, handling plain text or HTML errors
@@ -84,12 +90,32 @@ impl StatCanClient {
     }
 
     pub async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
+        // 1. Check cache (Read lock)
+        {
+            let cache = self.cubes_cache.read().await;
+            if let Some(cubes) = &*cache {
+                debug!("Cache HIT for getAllCubesListLite");
+                return Ok(CubeListResponse {
+                    object: Some(cubes.clone()),
+                    status: "SUCCESS".to_string(),
+                });
+            } else {
+                debug!("Cache MISS for getAllCubesListLite");
+            }
+        }
+
         let url = format!("{}/getAllCubesListLite", BASE_URL);
         let resp = self.client.get(&url).send().await?;
 
         let body = self.parse_statcan_response(resp).await?;
         let data: Vec<Cube> = serde_json::from_value(body)
             .map_err(|e| StatCanError::Api(format!("Failed to parse cube list: {}", e)))?;
+
+        // 2. Update cache (Write lock)
+        {
+            let mut cache = self.cubes_cache.write().await;
+            *cache = Some(data.clone());
+        }
 
         Ok(CubeListResponse {
             object: Some(data),
