@@ -1,7 +1,7 @@
+use chrono::{Datelike, Utc};
 use polars::prelude::*;
 use statcan_rs::StatCanClient;
 use std::error::Error;
-use chrono::{Datelike, Utc};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -44,12 +44,13 @@ async fn analyze_cpi(client: &StatCanClient) -> Result<(), Box<dyn Error>> {
         .filter_date_range(start_year, end_year)?
         .filter_column("Products and product groups", "All-items")?
         //.filter_geo("Province")? // "Province" might be case sensitive or not present in all rows as expected
-        .into_polars(); 
+        .into_polars();
 
     // Further filtering
-    let df_final = df_filtered.lazy()
+    let df_final = df_filtered
+        .lazy()
         .filter(col("GEO").neq(lit("Canada")))
-        .filter(col("GEO").str().contains_literal(lit("Province")).not()) // Actually we want to KEEP provinces? 
+        .filter(col("GEO").str().contains_literal(lit("Province")).not()) // Actually we want to KEEP provinces?
         // Wait, the original logic was: exclude Canada AND exclude "Province of..." if it's redundant?
         // Or maybe we want to keep rows where GEO is a province name.
         // Let's look at unique GEOs: "Newfoundland and Labrador", "Prince Edward Island", etc.
@@ -62,14 +63,15 @@ async fn analyze_cpi(client: &StatCanClient) -> Result<(), Box<dyn Error>> {
 
     println!("CPI Data (Head):");
     println!("{:?}", df_final.head(Some(5)));
-    
+
     // Group by GEO and calculate average CPI over the period
-    let avg_cpi = df_final.lazy()
+    let avg_cpi = df_final
+        .lazy()
         .group_by([col("GEO")])
         .agg([col("VALUE").mean().alias("avg_cpi_5y")])
         .sort("avg_cpi_5y", SortOptions::default())
         .collect()?;
-        
+
     println!("Average CPI by Province (Last 5 Years):");
     println!("{:?}", avg_cpi);
 
@@ -98,22 +100,28 @@ async fn analyze_unemployment(client: &StatCanClient) -> Result<(), Box<dyn Erro
         .into_polars();
 
     // Specific filtering that wrapper might not cover perfectly yet (like "NOT Canada" or partial match on Gender)
-    let df_final = df_filtered.lazy()
+    let df_final = df_filtered
+        .lazy()
         .filter(col("GEO").neq(lit("Canada")))
         .filter(col("Gender").str().contains_literal(lit("Total"))) // "Total - Gender"
-        .select([col("parsed_date").alias("date"), col("GEO"), col("VALUE").cast(DataType::Float64)])
+        .select([
+            col("parsed_date").alias("date"),
+            col("GEO"),
+            col("VALUE").cast(DataType::Float64),
+        ])
         .collect()?;
 
     println!("Unemployment Data (Head):");
     println!("{:?}", df_final.head(Some(5)));
 
     // Show latest unemployment rate by province
-    let latest_unemployment = df_final.lazy()
+    let latest_unemployment = df_final
+        .lazy()
         .sort_by_exprs(vec![col("date")], vec![true], true, false) // Sort by date descending
         .group_by([col("GEO")])
         .agg([
             col("VALUE").first().alias("latest_rate"),
-            col("date").first().alias("ref_date")
+            col("date").first().alias("ref_date"),
         ])
         .sort("latest_rate", SortOptions::default())
         .collect()?;
