@@ -76,7 +76,7 @@ class OpenDataClient:
         """
         try:
             req = self.client.build_request("GET", "datastore_search_sql", params={"sql": sql})
-            print(f"DEBUG URL: {req.url}")
+
             response = await self.client.send(req)
             response.raise_for_status()
             data = response.json()

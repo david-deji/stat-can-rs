@@ -8,7 +8,7 @@ pub use wrapper::StatCanDataFrame;
 
 use crate::models::{
     Cube, CubeListResponse, CubeMetadataResponse, DataPoint, DataResponse, FullTableResponse,
-    VectorDataResponse,
+    VectorDataResponse, Dimension, CubeMetadata,
 };
 use ::zip::ZipArchive;
 use polars::prelude::*;
@@ -56,7 +56,7 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
     padded_string
 }
 
-pub trait StatCanClientTrait: Send + Sync {
+pub trait StatCanClientTrait: CKANClient + Send + Sync {
     fn get_all_cubes_list_lite(&self) -> impl Future<Output = Result<CubeListResponse>> + Send;
     fn get_cube_metadata(
         &self,
@@ -933,6 +933,130 @@ impl CKANClient for GenericCKANDriver {
             .ok_or(StatCanError::Api("Invalid response: records missing".to_string()))?;
 
         Ok(records.clone())
+    }
+}
+
+
+
+pub async fn download_and_extract_file(client: &Client, url: &str, pid: &str) -> Result<std::path::PathBuf> {
+    let mut path = std::env::temp_dir();
+    path.push("statcan");
+    tokio::fs::create_dir_all(&path).await.unwrap_or(());
+    let csv_path = path.join(format!("{}.csv", pid));
+
+    if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
+        return Ok(csv_path);
+    }
+
+    let mut zip_resp = client.get(url).send().await?;
+    if !zip_resp.status().is_success() {
+         return Err(StatCanError::Api(format!("Download failed: {}", zip_resp.status())));
+    }
+
+    let zip_path = std::env::temp_dir().join(format!("statcan/{}.zip", pid));
+    let mut zip_file = tokio::fs::File::create(&zip_path).await?;
+    while let Some(chunk) = zip_resp.chunk().await? {
+        use tokio::io::AsyncWriteExt;
+        zip_file.write_all(&chunk).await?;
+    }
+    zip_file.sync_all().await?;
+    drop(zip_file); // Close file
+
+    let zip_path_clone = zip_path.clone();
+    let csv_path_clone = csv_path.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = std::fs::File::open(&zip_path_clone)?;
+        let mut archive = ZipArchive::new(file)?;
+        let mut csv_file = archive.by_index(0)?;
+        let mut out_file = std::fs::File::create(&csv_path_clone)?;
+        std::io::copy(&mut csv_file, &mut out_file)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
+
+    let _ = tokio::fs::remove_file(zip_path).await;
+    Ok(csv_path)
+}
+
+impl StatCanClientTrait for GenericCKANDriver {
+    async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
+        let packages = self.search_packages("*", 100).await?;
+        let cubes: Vec<Cube> = packages.into_iter().map(|p| Cube {
+            product_id: p.id.clone(),
+            cube_title_en: p.title,
+            cube_pid: Some(p.id),
+        }).collect();
+        Ok(CubeListResponse {
+            status: "SUCCESS".to_string(),
+            object: Some(cubes),
+        })
+    }
+
+    async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
+        let meta = self.get_package_metadata(pid).await?;
+        // Map PackageMetadata to minimal CubeMetadataResponse
+        // We only populate what we can
+        let dim = vec![Dimension {
+            dimension_name_en: "Columns".to_string(),
+            position_id: 1,
+            member: vec![], // No members known upfront
+        }];
+
+        Ok(CubeMetadataResponse {
+            status: "SUCCESS".to_string(),
+            object: Some(crate::models::CubeMetadata {
+                product_id: meta.id,
+                cube_title_en: meta.title,
+                dimension: dim,
+            }),
+        })
+    }
+
+    async fn find_cubes_by_dimension(&self, dim_query: &str, limit: usize) -> Result<Vec<(String, String, String)>> {
+        let packages = self.search_packages(dim_query, limit).await?;
+        Ok(packages.into_iter().map(|p| (p.id, p.title, dim_query.to_string())).collect())
+    }
+
+    async fn get_data_from_vectors(&self, _vectors: Vec<String>, _periods: i32) -> Result<DataResponse> {
+        Err(StatCanError::Api("Vector data not supported by generic CKAN driver".to_string()))
+    }
+
+    async fn get_data_from_coords(&self, _pid: &str, _coords: Vec<String>, _periods: i32) -> Result<DataResponse> {
+        Err(StatCanError::Api("Coordinate data not supported by generic CKAN driver".to_string()))
+    }
+
+    async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
+        // Fallback to fetching full table and taking head
+        let df = self.fetch_full_table(pid).await?;
+        Ok(df) // Not technically a snippet but works
+    }
+
+    async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
+        // 1. Get Resource Handler
+        let handler = self.get_resource_handler(pid).await?;
+
+        let url = match handler {
+             DataHandler::BlobDownload(u) => u,
+             DataHandler::DatastoreQuery(_) => return Err(StatCanError::Api("Cannot fetch full table from Datastore query yet".to_string())),
+        };
+
+        // 2. Download
+        let csv_path = download_and_extract_file(&self.client, &url, pid).await?;
+
+        // 3. Load to Polars
+        let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
+            let df = CsvReader::from_path(csv_path)?
+                .infer_schema(Some(100))
+                .has_header(true)
+                .finish()?;
+            Ok(df)
+        })
+        .await
+        .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
+
+        Ok(StatCanDataFrame::new(df))
     }
 }
 
