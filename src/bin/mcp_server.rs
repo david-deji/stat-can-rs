@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
 use futures::Stream;
 use polars::prelude::SerWriter;
@@ -797,7 +798,7 @@ async fn auth_middleware(
 
     // Check Legacy Key first (fastest)
     if let Some(legacy_key) = &state.legacy_key {
-        if token == legacy_key {
+        if constant_time_eq(token.as_bytes(), legacy_key.as_bytes()) {
             return Ok(next.run(request).await);
         }
     }
@@ -1054,5 +1055,51 @@ mod tests {
         let err = resp.unwrap_err();
         assert_eq!(err.code, -32000);
         assert_eq!(err.message, "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn test_auth_middleware_legacy_key() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+            middleware,
+            routing::get,
+            Router,
+        };
+        use tower::ServiceExt;
+
+        // Use real client since AppState requires concrete StatCanClient
+        // This is safe because auth_middleware doesn't use the client.
+        let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
+        let (tx, _rx) = broadcast::channel(1);
+        let state = AppState {
+            client,
+            sender: tx,
+            supabase: None,
+            use_supabase: false,
+            legacy_key: Some("secret-key".to_string()),
+        };
+
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .route_layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        // 1. Valid Key
+        let req = Request::builder()
+            .uri("/")
+            .header("Authorization", "Bearer secret-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 2. Invalid Key
+        let req = Request::builder()
+            .uri("/")
+            .header("Authorization", "Bearer wrong-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
