@@ -15,7 +15,7 @@ use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::info;
+use tracing::{debug, info};
 
 const BASE_URL: &str = "https://www150.statcan.gc.ca/t1/wds/rest";
 
@@ -50,22 +50,61 @@ impl StatCanClient {
         Ok(Self { client })
     }
 
+    /// Helper to safely parse API response, handling plain text or HTML errors
+    async fn parse_statcan_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+
+        // 1. Try to parse as JSON
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(json) => Ok(json),
+            Err(_) => {
+                // 2. Parsing failed. Inspect raw text.
+                if text.trim().starts_with("D") && text.contains("not found") {
+                    // Likely "Data not found" or "Database not available"
+                    return Err(StatCanError::Api(format!(
+                        "StatCan API Error: {}",
+                        text.trim()
+                    )));
+                }
+                if text.to_lowercase().contains("<html") || text.to_lowercase().contains("<body") {
+                    return Err(StatCanError::Api(format!(
+                        "StatCan Gateway Error (HTML received): Status {}",
+                        status
+                    )));
+                }
+
+                // Generic fallback
+                Err(StatCanError::Api(format!(
+                    "Invalid JSON response: {:.100}",
+                    text
+                )))
+            }
+        }
+    }
+
     pub async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
         let url = format!("{}/getAllCubesListLite", BASE_URL);
         let resp = self.client.get(&url).send().await?;
-        let data: Vec<Cube> = resp.json().await?;
+
+        let body = self.parse_statcan_response(resp).await?;
+        let data: Vec<Cube> = serde_json::from_value(body)
+            .map_err(|e| StatCanError::Api(format!("Failed to parse cube list: {}", e)))?;
+
         Ok(CubeListResponse {
             object: Some(data),
-            status: "SUCCESS".to_string(), // Implicit success if we got a list
+            status: "SUCCESS".to_string(),
         })
     }
 
     pub async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
         let url = format!("{}/getCubeMetadata", BASE_URL);
-        let body = json!([{ "productId": pid }]);
-        let resp = self.client.post(&url).json(&body).send().await?;
-        // The API returns a list of results, we asked for one.
-        let mut data: Vec<CubeMetadataResponse> = resp.json().await?;
+        let body_req = json!([{ "productId": pid }]);
+        let resp = self.client.post(&url).json(&body_req).send().await?;
+
+        let body_resp = self.parse_statcan_response(resp).await?;
+        let mut data: Vec<CubeMetadataResponse> = serde_json::from_value(body_resp)
+            .map_err(|e| StatCanError::Api(format!("Failed to parse metadata: {}", e)))?;
 
         if let Some(item) = data.pop() {
             if item.status != "SUCCESS" {
@@ -77,20 +116,82 @@ impl StatCanClient {
         }
     }
 
+    /// Find cubes that contain a specific dimension name (case-insensitive substring)
+    /// Optimizes by searching titles first, then checking metadata of top matches.
+    pub async fn find_cubes_by_dimension(
+        &self,
+        dim_query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        // 1. Get all cubes (lite) - this is cached by the OS usually or fast enough (array of structs)
+        let all_cubes = self.get_all_cubes_list_lite().await?;
+        let cubes = all_cubes.object.unwrap_or_default();
+
+        let query_lower = dim_query.to_lowercase();
+
+        // 2. Filter by Title Match (Heuristic: Title usually contains dimension keywords)
+        // We take top 50 title matches to inspect deeply
+        let candidates: Vec<&Cube> = cubes
+            .iter()
+            .filter(|c| c.cube_title_en.to_lowercase().contains(&query_lower))
+            .take(50)
+            .collect();
+
+        let mut results = Vec::new();
+
+        // 3. Inspect Metadata for candidates
+        for cube in candidates {
+            // Respect user limit on RESULTS
+            if results.len() >= limit {
+                break;
+            }
+
+            // Fetch metadata (might be slow loop, but constrained to 50 iterations max and breaks early)
+            // In a real app we might parallelize this with join_all
+            if let Ok(meta) = self.get_cube_metadata(&cube.product_id).await {
+                if let Some(obj) = meta.object {
+                    // Check if any dimension matches query strictly
+                    let has_dim = obj
+                        .dimension
+                        .iter()
+                        .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+
+                    if has_dim {
+                        results.push((
+                            cube.product_id.clone(),
+                            cube.cube_title_en.clone(),
+                            // Return the specifically matching dimension name(s) joined?
+                            obj.dimension
+                                .iter()
+                                .filter(|d| {
+                                    d.dimension_name_en.to_lowercase().contains(&query_lower)
+                                })
+                                .map(|d| d.dimension_name_en.clone())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     pub async fn get_data_from_coords(
         &self,
         pid: &str,
         coords: Vec<String>,
+        periods: i32,
     ) -> Result<DataResponse> {
         let url = format!("{}/getDataFromCubePidCoordAndLatestNPeriods", BASE_URL);
 
         let payload: Vec<_> = coords
-            .into_iter() // Changed from .iter() to consume `coords`
+            .into_iter()
             .map(|c_owned| {
-                let c = c_owned.trim(); // Trim whitespace
-                                        // Pad coordinate to 10 components if needed
+                let c = c_owned.trim();
                 let parts: Vec<&str> = c.split('.').collect();
-                let mut padded_string = c.to_string(); // Use c.to_string() as c is now &str
+                let mut padded_string = c.to_string();
                 if parts.len() < 10 {
                     let needed = 10 - parts.len();
                     for _ in 0..needed {
@@ -99,8 +200,8 @@ impl StatCanClient {
                 }
 
                 info!(
-                    "Fetching coord: original='{}', padded='{}'",
-                    c, padded_string
+                    "Fetching coord: original='{}', padded='{}', periods={}",
+                    c, padded_string, periods
                 );
 
                 let pid_val = if let Ok(n) = pid.parse::<i64>() {
@@ -112,22 +213,18 @@ impl StatCanClient {
                 json!({
                     "productId": pid_val,
                     "coordinate": padded_string,
-                    "latestN": 1
+                    "latestN": periods
                 })
             })
             .collect();
 
         let resp = self.client.post(&url).json(&payload).send().await?;
 
-        if !resp.status().is_success() {
-            return Err(StatCanError::Api(format!(
-                "API Error {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            )));
-        }
-
-        let responses: Vec<VectorDataResponse> = resp.json().await?;
+        // Use robust parsing
+        let body = self.parse_statcan_response(resp).await?;
+        let responses: Vec<VectorDataResponse> = serde_json::from_value(body).map_err(|e| {
+            StatCanError::Api(format!("Failed to deserialize coords response: {}", e))
+        })?;
 
         // Flatten and map to DataResponse
         let mut all_points = Vec::new();
@@ -159,7 +256,11 @@ impl StatCanClient {
         })
     }
 
-    pub async fn get_data_from_vectors(&self, vectors: Vec<String>) -> Result<DataResponse> {
+    pub async fn get_data_from_vectors(
+        &self,
+        vectors: Vec<String>,
+        periods: i32,
+    ) -> Result<DataResponse> {
         let url = format!("{}/getDataFromVectorsAndLatestNPeriods", BASE_URL);
         let payload: Vec<_> = vectors
             .iter()
@@ -174,13 +275,56 @@ impl StatCanClient {
 
                 json!({
                     "vectorId": id_val,
-                    "latestN": 1
+                    "latestN": periods
                 })
             })
             .collect();
 
         let resp = self.client.post(&url).json(&payload).send().await?;
-        let responses: Vec<VectorDataResponse> = resp.json().await?;
+
+        // Use robust parsing
+        let body = self.parse_statcan_response(resp).await?;
+        debug!("Vector response body: {:?}", body);
+
+        // Check if it's an error object (StatCan sometimes returns object instead of array on failure)
+        if body.is_object() {
+            // If it has "status" != "SUCCESS" or just looks like an error
+            // We can try to deserialize as StatCanErrorResponse
+            if let Ok(err_resp) =
+                serde_json::from_value::<crate::models::StatCanErrorResponse>(body.clone())
+            {
+                let mut is_error = false;
+                let mut status_msg = "FAILED".to_string();
+
+                if let Some(s) = &err_resp.status {
+                    if s != "SUCCESS" {
+                        is_error = true;
+                        status_msg = s.clone();
+                    }
+                } else if let Some(msg) = &err_resp.message {
+                    is_error = true;
+                    status_msg = msg.clone();
+                }
+
+                if is_error {
+                    info!(
+                        "API returned error for vectors: {:?} -> {}",
+                        vectors, status_msg
+                    );
+                    return Ok(DataResponse {
+                        status: status_msg,
+                        object: Some(Vec::new()),
+                    });
+                }
+            }
+        }
+
+        // If it's an array, or success object (if that happens?), try standard deserialization
+        let responses: Vec<VectorDataResponse> =
+            serde_json::from_value(body.clone()).map_err(|e| {
+                info!("Failed JSON body: {}", body);
+                StatCanError::Api(format!("Failed to deserialize vector response: {}", e))
+            })?;
 
         // Flatten and map
         let mut all_points = Vec::new();
@@ -212,10 +356,68 @@ impl StatCanClient {
         })
     }
 
+    pub async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
+        // 1. Get Metadata to find dimensions and valid members
+        let metadata = self.get_cube_metadata(pid).await?;
+        let meta_obj = metadata
+            .object
+            .ok_or(StatCanError::Api("No metadata found".to_string()))?;
+
+        // 2. Construct coordinate and prepare dimension columns
+        let mut coords_parts = Vec::new();
+        let mut check_added_columns = Vec::new();
+
+        for dim in meta_obj.dimension {
+            if let Some(first_member) = dim.member.first() {
+                coords_parts.push(first_member.member_id.to_string());
+                check_added_columns
+                    .push((dim.dimension_name_en, first_member.member_name_en.clone()));
+            } else {
+                // Dimension has no members? Use "1" as fallback but this is risky
+                coords_parts.push("1".to_string());
+                check_added_columns.push((dim.dimension_name_en, "Unknown".to_string()));
+            }
+        }
+
+        if coords_parts.is_empty() {
+            return Err(StatCanError::Api("Cube has no dimensions".to_string()));
+        }
+
+        // Join to standard coordinate: "1.1.1..."
+        let coord_str = coords_parts.join(".");
+
+        // 3. Fetch data for this coordinate (recent 1 period)
+        let data_resp = self.get_data_from_coords(pid, vec![coord_str], 1).await?;
+
+        // 4. Convert to DataFrame
+        let points = data_resp.object.unwrap_or_default();
+        if points.is_empty() {
+            return Ok(StatCanDataFrame::new(DataFrame::default()));
+        }
+
+        let df_wrapper = StatCanDataFrame::from_data_points(points)?;
+        let df = df_wrapper.into_polars();
+
+        // 5. Enrich with Dimension Columns (e.g. "Geography" = "Canada")
+        // We use lazy execution to add literal columns
+        let mut lazy = df.lazy();
+        for (col_name, col_val) in check_added_columns {
+            lazy = lazy.with_column(lit(col_val).alias(&col_name));
+        }
+
+        let enriched = lazy.collect()?;
+        Ok(StatCanDataFrame::new(enriched))
+    }
+
     pub async fn get_full_cube_from_cube_pid(&self, pid: &str) -> Result<FullTableResponse> {
         let url = format!("{}/getFullTableDownloadCSV/{}/en", BASE_URL, pid);
         let resp = self.client.get(&url).send().await?;
-        let data: FullTableResponse = resp.json().await?;
+        // Note: Full table download returns metadata JSON, not data. Data is in the URL inside.
+        // We can parse safely too.
+        let body = self.parse_statcan_response(resp).await?;
+        let data: FullTableResponse = serde_json::from_value(body).map_err(|e| {
+            StatCanError::Api(format!("Failed to parse full table response: {}", e))
+        })?;
 
         if data.status != "SUCCESS" {
             return Err(StatCanError::Api(format!("Status: {}", data.status)));

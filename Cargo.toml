@@ -1,7 +1,12 @@
 [package]
 name = "statcan-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+description = "A Rust client and Model Context Protocol (MCP) Server for the Statistics Canada API."
+license = "MIT"
+keywords = ["mcp", "statcan", "statistics", "canada", "ai"]
+categories = ["api-bindings", "science"]
+repository = "https://github.com/poche450/stat-can-rs"
 
 [lib]
 name = "statcan_rs"

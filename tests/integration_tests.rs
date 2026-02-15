@@ -38,3 +38,32 @@ async fn test_fetch_full_table() {
     let df = df_wrapper.as_polars();
     assert!(df.height() > 0);
 }
+
+#[tokio::test]
+async fn test_fetch_data_by_vector_periods() {
+    let client = StatCanClient::new().unwrap();
+    // CPI Vector v41690973, get last 2 periods
+    let result = client
+        .get_data_from_vectors(vec!["v41690973".to_string()], 2)
+        .await;
+
+    assert!(result.is_ok(), "Failed to fetch data: {:?}", result.err());
+    let response = result.unwrap();
+    assert_eq!(response.status, "SUCCESS");
+
+    let points = response.object.unwrap();
+    println!("Fetched {} points", points.len());
+
+    // Should get 2 points (one for each period requested)
+    // Note: StatCan API behaviour might return more points if multiple vectors, but for 1 vector over 2 periods, we expect 2 points.
+    // If the latestN periods span over missing months, it might be fewer, but for CPI it should be there.
+    assert!(
+        points.len() >= 2,
+        "Expected at least 2 points, got {}",
+        points.len()
+    );
+
+    // Verify they are distinct dates
+    let dates: std::collections::HashSet<_> = points.iter().map(|p| &p.ref_date).collect();
+    assert_eq!(dates.len(), 2, "Expected 2 distinct dates");
+}

@@ -122,3 +122,11 @@ pub struct VectorPoint {
     pub release_time: String,
     pub frequency_code: Option<i32>,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatCanErrorResponse {
+    pub status: Option<String>,
+    pub object: Option<String>,
+    pub message: Option<String>,
+}

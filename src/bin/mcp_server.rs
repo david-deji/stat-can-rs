@@ -36,6 +36,10 @@ struct Args {
     /// API Key for HTTP authentication
     #[arg(long, env = "MCP_API_KEY")]
     api_key: Option<String>,
+
+    /// Rate limit (requests per minute) for stdio mode. Default: 60.
+    #[arg(long, default_value = "60")]
+    rate_limit: u32,
 }
 
 #[tokio::main]
@@ -58,8 +62,11 @@ async fn main() -> anyhow::Result<()> {
         info!("Starting MCP server in HTTP/SSE mode on port {}", port);
         http_mode(port, args.api_key, client).await?;
     } else {
-        info!("Starting MCP server in Stdio mode");
-        stdio_mode(client).await?;
+        info!(
+            "Starting MCP server in Stdio mode (Rate Limit: {}/min)",
+            args.rate_limit
+        );
+        stdio_mode(client, args.rate_limit).await?;
     }
 
     Ok(())
@@ -98,7 +105,7 @@ async fn handle_request(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     match method {
-        "list_tools" => Ok(json!({
+        "tools/list" => Ok(json!({
             "tools": [
                 {
                     "name": "list_cubes",
@@ -122,18 +129,20 @@ async fn handle_request(
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "pid": { "type": "string", "description": "The Product ID" }
+                            "pid": { "type": "string", "description": "The Product ID" },
+                            "member_query": { "type": "string", "description": "Optional text to filter member names" }
                         },
                         "required": ["pid"]
                     }
                 },
                 {
                     "name": "search_cubes",
-                    "description": "Search for cubes by title",
+
+                    "description": "Search for cubes by title (supports multi-word queries)",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "query": { "type": "string", "description": "Search query" }
+                            "query": { "type": "string", "description": "Search query (e.g. 'labour ontario')" }
                         },
                         "required": ["query"]
                     }
@@ -144,7 +153,8 @@ async fn handle_request(
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "vectors": { "type": "array", "items": { "type": "string" }, "description": "List of Vector IDs" }
+                            "vectors": { "type": "array", "items": { "type": "string" }, "description": "List of Vector IDs" },
+                            "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
                         },
                         "required": ["vectors"]
                     }
@@ -156,28 +166,42 @@ async fn handle_request(
                         "type": "object",
                         "properties": {
                             "pid": { "type": "string", "description": "The Product ID" },
-                            "coords": { "type": "array", "items": { "type": "string" }, "description": "List of Coordinate strings" }
+                            "coords": { "type": "array", "items": { "type": "string" }, "description": "List of Coordinate strings" },
+                            "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
                         },
                         "required": ["pid", "coords"]
                     }
                 },
                 {
+                    "name": "search_cubes_by_dimension",
+                    "description": "Find cubes that contain a specific dimension name (e.g. 'Geography', 'NAICS'). Useful for finding relevant data sets when you know the dimension you need.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "dimension_name": { "type": "string", "description": "Dimension name to search for (case-insensitive substring)" },
+                            "limit": { "type": "integer", "description": "Max number of cubes to return (default 10)" }
+                        },
+                        "required": ["dimension_name"]
+                    }
+                },
+                {
                     "name": "fetch_data_snippet",
-                    "description": "Fetch data from a cube. Supports filtering by Geography and getting the most recent N periods.",
+                    "description": "Fetch data from a cube. Supports filtering by Geography and getting the most recent N periods. Results are sorted most-recent-first by default. Filters use exact match first, falling back to substring.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "pid": { "type": "string", "description": "The Product ID" },
-                            "rows": { "type": "integer", "description": "Number of rows to return (default 5, ignored if recent_months is set)" },
+                            "rows": { "type": "integer", "description": "Number of rows to return (default 5). Results are always sorted most-recent-first." },
                             "geo": { "type": "string", "description": "Filter by Geography (e.g. 'Canada', 'British Columbia')" },
-                            "recent_months": { "type": "integer", "description": "Get the last N months/periods (sorts by date descending)" }
+                            "recent_months": { "type": "integer", "description": "Get ALL rows for the last N time periods. Returns every row (all geographies, industries, etc.) matching those periods." },
+                            "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs for column filtering. Uses exact match first, then substring fallback (e.g. {'Products and product groups': 'Energy'} matches 'Energy' exactly, not 'All-items excluding energy')" }
                         },
                         "required": ["pid"]
                     }
                 }
             ]
         })),
-        "call_tool" => {
+        "tools/call" => {
             let params = params.ok_or(JsonRpcError {
                 code: -32602,
                 message: "Missing params".to_string(),
@@ -250,12 +274,25 @@ async fn handle_request(
                         message: "Table not found".to_string(),
                     })?;
 
+                    let member_query_lower =
+                        args["member_query"].as_str().map(|s| s.to_lowercase());
+
                     // Simplify output: Map Dimension Name -> List of Member Names
                     let simplified: std::collections::HashMap<String, Vec<String>> = metadata
                         .dimension
                         .into_iter()
                         .map(|d| {
-                            let members = d.member.into_iter().map(|m| m.member_name_en).collect();
+                            let members: Vec<String> = d
+                                .member
+                                .into_iter()
+                                .map(|m| format!("{} (ID: {})", m.member_name_en, m.member_id))
+                                .filter(|name| {
+                                    member_query_lower
+                                        .as_ref()
+                                        .map(|q| name.to_lowercase().contains(q))
+                                        .unwrap_or(true)
+                                })
+                                .collect();
                             (d.dimension_name_en, members)
                         })
                         .collect();
@@ -279,17 +316,28 @@ async fn handle_request(
                             })?;
 
                     let all_cubes = resp.object.unwrap_or_default();
+                    let terms: Vec<String> =
+                        query.split_whitespace().map(|s| s.to_lowercase()).collect();
+
                     let results: Vec<&statcan_rs::models::Cube> = all_cubes
                         .iter()
                         .filter(|c| {
-                            c.cube_title_en
-                                .to_lowercase()
-                                .contains(&query.to_lowercase())
+                            let title_lower = c.cube_title_en.to_lowercase();
+                            // ALL terms must be present (AND logic)
+                            terms.iter().all(|term| title_lower.contains(term))
                         })
+                        .take(100)
                         .collect();
-                    Ok(
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results).unwrap() }] }),
-                    )
+
+                    if results.is_empty() {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }),
+                        )
+                    } else {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results).unwrap() }] }),
+                        )
+                    }
                 }
                 "fetch_data_by_vector" => {
                     let vectors_val = args["vectors"].as_array().ok_or(JsonRpcError {
@@ -307,17 +355,30 @@ async fn handle_request(
                         })
                         .collect();
 
-                    let resp =
-                        client
-                            .get_data_from_vectors(vectors)
-                            .await
-                            .map_err(|e| JsonRpcError {
-                                code: -32000,
-                                message: e.to_string(),
-                            })?;
-                    Ok(
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
-                    )
+                    let periods = args["recent_periods"].as_i64().unwrap_or(1) as i32;
+
+                    let resp = client
+                        .get_data_from_vectors(vectors, periods)
+                        .await
+                        .map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: e.to_string(),
+                        })?;
+                    if resp.status != "SUCCESS" {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
+                        )
+                    } else if resp.object.is_none()
+                        || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+                    {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
+                        )
+                    } else {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
+                        )
+                    }
                 }
                 "fetch_data_by_coords" => {
                     let pid = args["pid"].as_str().ok_or(JsonRpcError {
@@ -339,15 +400,61 @@ async fn handle_request(
                         })
                         .collect();
 
+                    let periods = args["recent_periods"].as_i64().unwrap_or(1) as i32;
+
                     let resp = client
-                        .get_data_from_coords(pid, coords)
+                        .get_data_from_coords(pid, coords, periods)
                         .await
                         .map_err(|e| JsonRpcError {
                             code: -32000,
                             message: e.to_string(),
                         })?;
+                    if resp.status != "SUCCESS" {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
+                        )
+                    } else if resp.object.is_none()
+                        || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+                    {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
+                        )
+                    } else {
+                        Ok(
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
+                        )
+                    }
+                }
+                "search_cubes_by_dimension" => {
+                    let dim_name = args["dimension_name"].as_str().ok_or(JsonRpcError {
+                        code: -32602,
+                        message: "Missing dimension_name".to_string(),
+                    })?;
+                    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+                    let results = client
+                        .find_cubes_by_dimension(dim_name, limit)
+                        .await
+                        .map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: e.to_string(),
+                        })?;
+
+                    // Format results nicely
+                    // Result: Vec<(pid, title, matching_dims)>
+                    let output_json = json!(results
+                        .iter()
+                        .map(|(pid, title, dims)| {
+                            json!({
+                                "productId": pid,
+                                "title": title,
+                                "matching_dimensions": dims
+                            })
+                        })
+                        .collect::<Vec<_>>());
+
                     Ok(
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&output_json).unwrap() }] }),
                     )
                 }
                 "fetch_data_snippet" => {
@@ -358,6 +465,40 @@ async fn handle_request(
                     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
                     let geo = args["geo"].as_str();
                     let recent_months = args["recent_months"].as_u64(); // Option<u64>
+                    let filters = args["filters"].as_object(); // Option<&Map>
+
+                    // OPTIMIZATION: If no filters and no geo, try fast snippet first
+                    if geo.is_none()
+                        && filters.is_none()
+                        && recent_months.unwrap_or(1) <= 1
+                        && rows <= 5
+                    {
+                        if let Ok(df) = client.fetch_fast_snippet(pid).await {
+                            if df.as_polars().height() > 0 {
+                                let mut polars_df = df.into_polars();
+                                let mut buf = Vec::new();
+                                polars::prelude::JsonWriter::new(&mut buf)
+                                    .with_json_format(polars::prelude::JsonFormat::Json)
+                                    .finish(&mut polars_df)
+                                    .map_err(|e| JsonRpcError {
+                                        code: -32000,
+                                        message: format!("Serialization error: {}", e),
+                                    })?;
+
+                                let output = String::from_utf8(buf).map_err(|e| JsonRpcError {
+                                    code: -32000,
+                                    message: format!("UTF-8 error: {}", e),
+                                })?;
+                                return Ok(
+                                    json!({ "content": [{ "type": "text", "text": output }] }),
+                                );
+                            }
+                        }
+                        info!(
+                            "Fast snippet failed or empty for {}, falling back to full download.",
+                            pid
+                        );
+                    }
 
                     let mut df_wrapper =
                         client
@@ -368,7 +509,7 @@ async fn handle_request(
                                 message: e.to_string(),
                             })?;
 
-                    // Filter by Geography if provided
+                    // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
                     if let Some(g) = geo {
                         df_wrapper = df_wrapper.filter_geo(g).map_err(|e| JsonRpcError {
                             code: -32000,
@@ -376,18 +517,39 @@ async fn handle_request(
                         })?;
                     }
 
-                    // Filter recent months (Sort Descending by Date + Take N)
+                    // Apply generic filters (Fuzzy Match enabled in wrapper)
+                    if let Some(f) = filters {
+                        for (col, val) in f {
+                            if let Some(v_str) = val.as_str() {
+                                df_wrapper = df_wrapper.filter_column(col, v_str).map_err(|e| {
+                                    JsonRpcError {
+                                        code: -32000,
+                                        message: e.to_string(),
+                                    }
+                                })?;
+                            }
+                        }
+                    }
+
+                    // Get recent periods (returns ALL rows for N most recent dates)
                     if let Some(n) = recent_months {
+                        df_wrapper = df_wrapper.take_recent_periods(n as usize).map_err(|e| {
+                            JsonRpcError {
+                                code: -32000,
+                                message: e.to_string(),
+                            }
+                        })?;
+                        // Sort descending so most recent data appears first
                         df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError {
                             code: -32000,
                             message: e.to_string(),
                         })?;
-                        df_wrapper = df_wrapper.take_n(n as usize).map_err(|e| JsonRpcError {
+                    } else {
+                        // Default: sort descending (most recent first) then take N rows
+                        df_wrapper = df_wrapper.sort_date(true).map_err(|e| JsonRpcError {
                             code: -32000,
                             message: e.to_string(),
                         })?;
-                    } else {
-                        // Default behavior: just take head of whatever order (or use rows arg)
                         df_wrapper = df_wrapper.take_n(rows).map_err(|e| JsonRpcError {
                             code: -32000,
                             message: e.to_string(),
@@ -417,6 +579,18 @@ async fn handle_request(
                 }),
             }
         }
+        "initialize" => Ok(json!({
+            "protocolVersion": "2024-11-05",
+            "server": {
+                "name": "stat-can-rs",
+                "version": "0.1.0"
+            },
+            "capabilities": {
+                "tools": {}
+            }
+        })),
+        "notifications/initialized" => Ok(json!({})),
+        "ping" => Ok(json!({})),
         _ => Err(JsonRpcError {
             code: -32601,
             message: "Method not found".to_string(),
@@ -426,10 +600,19 @@ async fn handle_request(
 
 // --- Stdio Mode ---
 
-async fn stdio_mode(client: Arc<StatCanClient>) -> anyhow::Result<()> {
+use governor::{Quota, RateLimiter};
+use std::num::NonZeroU32;
+
+async fn stdio_mode(client: Arc<StatCanClient>, rate_limit_per_min: u32) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut line = String::new();
+
+    // Configure Rate Limiter
+    let quota = Quota::per_minute(
+        NonZeroU32::new(rate_limit_per_min).unwrap_or(NonZeroU32::new(60).unwrap()),
+    );
+    let limiter = RateLimiter::direct(quota);
 
     while handle.read_line(&mut line)? > 0 {
         if line.trim().is_empty() {
@@ -437,25 +620,40 @@ async fn stdio_mode(client: Arc<StatCanClient>) -> anyhow::Result<()> {
             continue;
         }
 
+        // Enforce Rate Limit
+        if let Err(_) = limiter.check() {
+            // If rate limited, we should probably return an error JSON-RPC response
+            // asking the client to back off, or just block.
+            // Blocking is better for stdio as it acts as backpressure.
+            limiter.until_ready().await;
+        }
+
         let req: Result<JsonRpcRequest, _> = serde_json::from_str(&line);
         match req {
             Ok(req) => {
+                let is_notification = req.id.is_none();
                 let result = handle_request(client.clone(), &req.method, req.params).await;
-                let resp = match result {
-                    Ok(res) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: Some(res),
-                        error: None,
-                        id: req.id,
-                    },
-                    Err(err) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: None,
-                        error: Some(err),
-                        id: req.id,
-                    },
-                };
-                println!("{}", serde_json::to_string(&resp)?);
+
+                if !is_notification {
+                    let resp = match result {
+                        Ok(res) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            result: Some(res),
+                            error: None,
+                            id: req.id,
+                        },
+                        Err(err) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            result: None,
+                            error: Some(err),
+                            id: req.id,
+                        },
+                    };
+                    match serde_json::to_string(&resp) {
+                        Ok(json_str) => println!("{}", json_str),
+                        Err(e) => error!("Failed to serialize response: {}", e),
+                    }
+                }
             }
             Err(e) => {
                 error!("Failed to parse request: {}", e);
