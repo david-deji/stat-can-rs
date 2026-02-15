@@ -546,17 +546,17 @@ impl StatCanClient {
         Ok(data)
     }
 
-    fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
+    async fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
         Self::validate_pid(pid)?;
         let mut path = std::env::temp_dir();
         path.push("statcan");
-        std::fs::create_dir_all(&path).unwrap_or(()); // Ensure dir exists
+        tokio::fs::create_dir_all(&path).await.unwrap_or(()); // Ensure dir exists
         path.push(format!("{}.csv", pid));
         Ok(path)
     }
 
     async fn fetch_file_with_cache(&self, pid: &str) -> Result<std::path::PathBuf> {
-        let csv_path = self.get_cache_path(pid)?;
+        let csv_path = self.get_cache_path(pid).await?;
         if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
             info!("Cache hit for PID: {}", pid);
             return Ok(csv_path);
@@ -700,11 +700,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_get_cache_path_security() {
+    #[tokio::test]
+    async fn test_get_cache_path_security() {
         let client = StatCanClient::new().unwrap();
         // Should fail because of validation
-        let res = client.get_cache_path("../bad_path");
+        let res = client.get_cache_path("../bad_path").await;
         assert!(res.is_err());
         match res.unwrap_err() {
             StatCanError::Api(msg) => assert_eq!(msg, "Invalid PID format"),
@@ -712,7 +712,7 @@ mod tests {
         }
 
         // Should succeed for valid PID
-        let res_ok = client.get_cache_path("12345678");
+        let res_ok = client.get_cache_path("12345678").await;
         assert!(res_ok.is_ok());
     }
 }
