@@ -49,24 +49,9 @@ impl StatCanDataFrame {
     /// Case-insensitive match
     pub fn filter_geo(self, pattern: &str) -> Result<Self, StatCanError> {
         // Try to resolve "geo" or "Geography"
-        let col_name = self
-            .resolve_column_name("Geography")
-            .or_else(|_| self.resolve_column_name("GEO"))
-            .or_else(|_| self.resolve_column_name("geo"))?;
+        let col_name = self.resolve_any_column(&["Geography", "GEO", "geo"])?;
 
-        let pattern_lower = pattern.to_lowercase();
-        let df = self
-            .0
-            .lazy()
-            .filter(
-                col(&col_name)
-                    .str()
-                    .to_lowercase()
-                    .str()
-                    .contains_literal(lit(pattern_lower)),
-            )
-            .collect()?;
-        Ok(Self(df))
+        self.apply_fuzzy_filter(&col_name, pattern)
     }
 
     /// Filter by Reference Date (REF_DATE column)
@@ -106,15 +91,19 @@ impl StatCanDataFrame {
     pub fn filter_column(self, col_name: &str, value: &str) -> Result<Self, StatCanError> {
         // 1. Resolve Column Name
         let actual_col = self.resolve_column_name(col_name)?;
+        self.apply_fuzzy_filter(&actual_col, value)
+    }
+
+    fn apply_fuzzy_filter(self, col_name: &str, value: &str) -> Result<Self, StatCanError> {
         let value_lower = value.to_lowercase();
 
-        // 2. Try exact match first (case-insensitive equality)
+        // 1. Try exact match first (case-insensitive equality)
         let exact_df = self
             .0
             .clone()
             .lazy()
             .filter(
-                col(&actual_col)
+                col(col_name)
                     .str()
                     .to_lowercase()
                     .eq(lit(value_lower.clone())),
@@ -125,12 +114,12 @@ impl StatCanDataFrame {
             return Ok(Self(exact_df));
         }
 
-        // 3. Fallback: substring contains (case-insensitive)
+        // 2. Fallback: substring contains (case-insensitive)
         let df = self
             .0
             .lazy()
             .filter(
-                col(&actual_col)
+                col(col_name)
                     .str()
                     .to_lowercase()
                     .str()
@@ -138,6 +127,18 @@ impl StatCanDataFrame {
             )
             .collect()?;
         Ok(Self(df))
+    }
+
+    fn resolve_any_column(&self, candidates: &[&str]) -> Result<String, StatCanError> {
+        for candidate in candidates {
+            if let Ok(col) = self.resolve_column_name(candidate) {
+                return Ok(col);
+            }
+        }
+        Err(StatCanError::Api(format!(
+            "Could not resolve any of the columns: {:?}",
+            candidates
+        )))
     }
 
     /// Helper: Find the best matching column name
@@ -498,5 +499,25 @@ mod tests {
 
         // All 12 rows (3 periods × 4 geos)
         assert_eq!(res.height(), 12);
+    }
+
+    #[test]
+    fn test_filter_geo_exact_match_preferred() {
+        let df = df!(
+            "GEO" => &["Ontario", "Ontario (North)", "Quebec"],
+            "REF_DATE" => &["2020-01", "2020-01", "2020-01"],
+            "VALUE" => &[100.0, 200.0, 300.0]
+        )
+        .unwrap();
+        let wrapper = StatCanDataFrame::new(df);
+
+        // Searching for "Ontario" should match only the exact "Ontario" row,
+        // prioritizing it over "Ontario (North)".
+        let filtered = wrapper.filter_geo("Ontario").unwrap();
+        let res = filtered.as_polars();
+
+        assert_eq!(res.height(), 1);
+        let val = res.column("GEO").unwrap().str().unwrap().get(0).unwrap();
+        assert_eq!(val, "Ontario");
     }
 }
