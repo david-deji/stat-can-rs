@@ -1,4 +1,5 @@
 /target
 /prompt_test_script
 /.jules
-
+/examples
+cargo.lock
