@@ -15,12 +15,13 @@ use futures::stream::{self, StreamExt};
 use futures::Stream;
 use polars::prelude::SerWriter;
 use postgrest::Postgrest;
-use rand::{thread_rng, Rng};
+use rand::thread_rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
+use statcan_rs::security::generate_api_key;
 use std::{
     convert::Infallible,
     io::BufRead,
@@ -740,15 +741,8 @@ async fn handle_register(
         }
     }
 
-    // Generate API Key: sk_live_<32_random_chars>
-    let random_bytes: [u8; 24] = thread_rng().gen();
-    let key_secret = hex::encode(random_bytes);
-    let api_key = format!("sk_live_{}", key_secret);
-
-    // Hash it for storage
-    let mut hasher = Sha256::new();
-    hasher.update(api_key.as_bytes());
-    let key_hash = hex::encode(hasher.finalize());
+    // Generate API Key: sk_live_<hex_secret>
+    let (api_key, key_hash) = generate_api_key(&mut thread_rng());
 
     // Store in Supabase
     let supabase = state.supabase.as_ref().unwrap();
