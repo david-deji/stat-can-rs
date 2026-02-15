@@ -75,7 +75,9 @@ class OpenDataClient:
         Performs a SQL query on the datastore.
         """
         try:
-            response = await self.client.get("datastore_search_sql", params={"sql": sql})
+            req = self.client.build_request("GET", "datastore_search_sql", params={"sql": sql})
+            print(f"DEBUG URL: {req.url}")
+            response = await self.client.send(req)
             response.raise_for_status()
             data = response.json()
             if not data.get("success"):
@@ -100,4 +102,3 @@ class OpenDataClient:
              raise Exception("No English CSV resources found.")
              
         return english_resources[0]["id"]
-        

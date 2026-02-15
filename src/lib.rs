@@ -743,6 +743,200 @@ impl CKANClient for StatCanDriver {
 }
 
 
+
+#[derive(Clone)]
+pub struct GenericCKANDriver {
+    client: Client,
+    base_url: String,
+}
+
+impl GenericCKANDriver {
+    pub fn new(base_url: &str) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .gzip(true)
+            .build()?;
+        // Ensure base_url doesn't end with slash to make joining easier
+        let base_url = base_url.trim_end_matches('/').to_string();
+        Ok(Self { client, base_url })
+    }
+}
+
+#[async_trait]
+impl CKANClient for GenericCKANDriver {
+    async fn ping(&self) -> Result<String> {
+        // Simple check: site_read or just root API
+        let url = format!("{}/api/3/action/site_read", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        if resp.status().is_success() {
+             Ok("CKAN API OK".to_string())
+        } else {
+             // Fallback: Try package_search with limit 0
+             let fallback_url = format!("{}/api/3/action/package_search?rows=0", self.base_url);
+             let fallback_resp = self.client.get(&fallback_url).send().await?;
+             if fallback_resp.status().is_success() {
+                 Ok("CKAN API OK (Fallback)".to_string())
+             } else {
+                 Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
+             }
+        }
+    }
+
+    async fn search_packages(&self, query: &str, limit: usize) -> Result<Vec<PackageMetadata>> {
+        let url = format!("{}/api/3/action/package_search", self.base_url);
+        let resp = self.client.get(&url)
+            .query(&[("q", query), ("rows", &limit.to_string())])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(StatCanError::Api(format!("Search failed: {}", resp.status())));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+
+        if let Some(false) = body["success"].as_bool() {
+             return Err(StatCanError::Api("CKAN API Error: search unsuccessful".to_string()));
+        }
+
+        let results = body["result"]["results"].as_array()
+            .ok_or(StatCanError::Api("Invalid response structure: results missing".to_string()))?;
+
+        let mut packages = Vec::new();
+        for pkg in results {
+            let id = pkg["id"].as_str().unwrap_or_default().to_string();
+            let title = pkg["title"].as_str().unwrap_or_default().to_string();
+            let notes = pkg["notes"].as_str().map(|s| s.to_string());
+            let url = pkg["url"].as_str().map(|s| s.to_string());
+
+            let mut resources = Vec::new();
+            if let Some(res_list) = pkg["resources"].as_array() {
+                for res in res_list {
+                    resources.push(ResourceMetadata {
+                        id: res["id"].as_str().unwrap_or_default().to_string(),
+                        name: res["name"].as_str().unwrap_or_default().to_string(),
+                        format: res["format"].as_str().map(|s| s.to_string()),
+                        url: res["url"].as_str().map(|s| s.to_string()),
+                    });
+                }
+            }
+
+            packages.push(PackageMetadata {
+                id,
+                title,
+                notes,
+                url,
+                resources,
+            });
+        }
+
+        Ok(packages)
+    }
+
+    async fn get_package_metadata(&self, id: &str) -> Result<PackageMetadata> {
+        let url = format!("{}/api/3/action/package_show", self.base_url);
+        let resp = self.client.get(&url)
+            .query(&[("id", id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+             return Err(StatCanError::Api(format!("Get package failed: {}", resp.status())));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        if let Some(false) = body["success"].as_bool() {
+             return Err(StatCanError::Api("CKAN API Error: package_show unsuccessful".to_string()));
+        }
+
+        let pkg = &body["result"];
+        let pkg_id = pkg["id"].as_str().unwrap_or_default().to_string();
+        let title = pkg["title"].as_str().unwrap_or_default().to_string();
+        let notes = pkg["notes"].as_str().map(|s| s.to_string());
+        let pkg_url = pkg["url"].as_str().map(|s| s.to_string());
+
+        let mut resources = Vec::new();
+        if let Some(res_list) = pkg["resources"].as_array() {
+            for res in res_list {
+                resources.push(ResourceMetadata {
+                    id: res["id"].as_str().unwrap_or_default().to_string(),
+                    name: res["name"].as_str().unwrap_or_default().to_string(),
+                    format: res["format"].as_str().map(|s| s.to_string()),
+                    url: res["url"].as_str().map(|s| s.to_string()),
+                });
+            }
+        }
+
+        Ok(PackageMetadata {
+            id: pkg_id,
+            title,
+            notes,
+            url: pkg_url,
+            resources,
+        })
+    }
+
+    async fn get_resource_handler(&self, resource_id: &str) -> Result<DataHandler> {
+        // We need to fetch resource details to see if datastore is active
+        // Typically, we use resource_show
+        let url = format!("{}/api/3/action/resource_show", self.base_url);
+        let resp = self.client.get(&url)
+            .query(&[("id", resource_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+             return Err(StatCanError::Api(format!("Get resource failed: {}", resp.status())));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        if let Some(false) = body["success"].as_bool() {
+             return Err(StatCanError::Api("CKAN API Error: resource_show unsuccessful".to_string()));
+        }
+
+        let res = &body["result"];
+        let datastore_active = res["datastore_active"].as_bool().unwrap_or(false);
+        let download_url = res["url"].as_str().ok_or(StatCanError::Api("Resource has no URL".to_string()))?.to_string();
+
+        if datastore_active {
+            Ok(DataHandler::DatastoreQuery(resource_id.to_string()))
+        } else {
+            Ok(DataHandler::BlobDownload(download_url))
+        }
+    }
+
+    async fn query_datastore(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        let url = format!("{}/api/3/action/datastore_search_sql", self.base_url);
+
+        // CKAN's datastore_search_sql usually takes 'sql' as a query param
+        let resp = self.client.get(&url)
+            .query(&[("sql", sql)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+             // Try to parse error message
+             let status = resp.status();
+             let error_text = resp.text().await.unwrap_or_default();
+             return Err(StatCanError::Api(format!("SQL query failed ({}): {}", status, error_text)));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        if let Some(false) = body["success"].as_bool() {
+             let error_msg = body["error"].as_str()
+                .or_else(|| body["error"]["message"].as_str())
+                .unwrap_or("Unknown error");
+             return Err(StatCanError::Api(format!("CKAN API Error: {}", error_msg)));
+        }
+
+        let records = body["result"]["records"].as_array()
+            .ok_or(StatCanError::Api("Invalid response: records missing".to_string()))?;
+
+        Ok(records.clone())
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
