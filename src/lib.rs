@@ -441,34 +441,29 @@ impl StatCanClient {
 
         // Check if it's an error object (StatCan sometimes returns object instead of array on failure)
         if body.is_object() {
-            // If it has "status" != "SUCCESS" or just looks like an error
-            // We can try to deserialize as StatCanErrorResponse
-            if let Ok(err_resp) =
-                serde_json::from_value::<crate::models::StatCanErrorResponse>(body.clone())
-            {
-                let mut is_error = false;
-                let mut status_msg = "FAILED".to_string();
+            // Direct inspection to avoid cloning and deserialization overhead
+            let mut is_error = false;
+            let mut status_msg = "FAILED".to_string();
 
-                if let Some(s) = &err_resp.status {
-                    if s != "SUCCESS" {
-                        is_error = true;
-                        status_msg = s.clone();
-                    }
-                } else if let Some(msg) = &err_resp.message {
+            if let Some(s) = body.get("status").and_then(|v| v.as_str()) {
+                if s != "SUCCESS" {
                     is_error = true;
-                    status_msg = msg.clone();
+                    status_msg = s.to_string();
                 }
+            } else if let Some(msg) = body.get("message").and_then(|v| v.as_str()) {
+                is_error = true;
+                status_msg = msg.to_string();
+            }
 
-                if is_error {
-                    info!(
-                        "API returned error for vectors: {:?} -> {}",
-                        vectors, status_msg
-                    );
-                    return Ok(DataResponse {
-                        status: status_msg,
-                        object: Some(Vec::new()),
-                    });
-                }
+            if is_error {
+                info!(
+                    "API returned error for vectors: {:?} -> {}",
+                    vectors, status_msg
+                );
+                return Ok(DataResponse {
+                    status: status_msg,
+                    object: Some(Vec::new()),
+                });
             }
         }
 
