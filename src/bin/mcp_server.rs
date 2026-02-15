@@ -15,11 +15,12 @@ use futures::Stream;
 use polars::prelude::SerWriter;
 use postgrest::Postgrest;
 use rand::{thread_rng, Rng};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use statcan_rs::StatCanClient;
-use std::{convert::Infallible, io::BufRead, sync::Arc};
+use std::{convert::Infallible, io::BufRead, sync::{Arc, OnceLock}};
 use tokio::sync::broadcast;
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
@@ -601,6 +602,29 @@ struct AppState {
     legacy_key: Option<String>,
 }
 
+static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn is_valid_email(email: &str) -> bool {
+    let re = EMAIL_REGEX.get_or_init(|| {
+        Regex::new(r"^(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$").unwrap()
+    });
+    if !re.is_match(email) {
+        return false;
+    }
+    // Additional checks for common pitfalls not easily caught by simple regex
+    if email.contains("..")
+        || email.starts_with('.')
+        || email
+            .split('@')
+            .next()
+            .map(|s| s.ends_with('.'))
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    true
+}
+
 #[derive(serde::Deserialize)]
 struct RegisterRequest {
     email: Option<String>,
@@ -621,6 +645,16 @@ async fn handle_register(
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({"error": "Registration not enabled"})),
         );
+    }
+
+    // Validate email format if provided
+    if let Some(email) = &payload.email {
+        if !is_valid_email(email) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid email format"})),
+            );
+        }
     }
 
     // Generate API Key: sk_live_<32_random_chars>
@@ -821,4 +855,33 @@ async fn sse_handler(
     let stream = stream::once(async { Ok(endpoint_event) }).chain(notification_stream);
 
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_email_validation() {
+        // Valid emails
+        assert!(is_valid_email("test@example.com"));
+        assert!(is_valid_email("user.name@domain.co.uk"));
+        assert!(is_valid_email("user+tag@example.com"));
+        assert!(is_valid_email("1234567890@example.com"));
+        assert!(is_valid_email("email@example-one.com"));
+
+        // Invalid emails
+        assert!(!is_valid_email("plainaddress"));
+        assert!(!is_valid_email("#@%^%#$@#$@#.com"));
+        assert!(!is_valid_email("@example.com"));
+        assert!(!is_valid_email("Joe Smith <email@example.com>"));
+        assert!(!is_valid_email("email.example.com"));
+        assert!(!is_valid_email("email@example@example.com"));
+        assert!(!is_valid_email(".email@example.com"));
+        assert!(!is_valid_email("email.@example.com"));
+        assert!(!is_valid_email("email..email@example.com"));
+        assert!(!is_valid_email("あいうえお@example.com"));
+        assert!(!is_valid_email("email@example.com (Joe Smith)"));
+        assert!(!is_valid_email("email@example"));
+    }
 }
