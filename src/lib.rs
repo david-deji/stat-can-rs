@@ -54,9 +54,7 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
 }
 
 pub trait StatCanClientTrait: Send + Sync {
-    fn get_all_cubes_list_lite(
-        &self,
-    ) -> impl Future<Output = Result<CubeListResponse>> + Send;
+    fn get_all_cubes_list_lite(&self) -> impl Future<Output = Result<CubeListResponse>> + Send;
     fn get_cube_metadata(
         &self,
         pid: &str,
@@ -81,10 +79,7 @@ pub trait StatCanClientTrait: Send + Sync {
         &self,
         pid: &str,
     ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
-    fn fetch_full_table(
-        &self,
-        pid: &str,
-    ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
+    fn fetch_full_table(&self, pid: &str) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
 }
 
 impl StatCanClientTrait for StatCanClient {
@@ -276,10 +271,7 @@ impl StatCanClient {
         pids: Vec<String>,
     ) -> Result<Vec<CubeMetadataResponse>> {
         let url = format!("{}/getCubeMetadata", BASE_URL);
-        let body_req: Vec<_> = pids
-            .iter()
-            .map(|pid| json!({ "productId": pid }))
-            .collect();
+        let body_req: Vec<_> = pids.iter().map(|pid| json!({ "productId": pid })).collect();
         let resp = self.client.post(&url).json(&body_req).send().await?;
 
         let body_resp = self.parse_statcan_response(resp).await?;
@@ -559,17 +551,17 @@ impl StatCanClient {
         Ok(data)
     }
 
-    fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
+    async fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
         Self::validate_pid(pid)?;
         let mut path = std::env::temp_dir();
         path.push("statcan");
-        std::fs::create_dir_all(&path).unwrap_or(()); // Ensure dir exists
+        tokio::fs::create_dir_all(&path).await.unwrap_or(()); // Ensure dir exists
         path.push(format!("{}.csv", pid));
         Ok(path)
     }
 
     async fn fetch_file_with_cache(&self, pid: &str) -> Result<std::path::PathBuf> {
-        let csv_path = self.get_cache_path(pid)?;
+        let csv_path = self.get_cache_path(pid).await?;
         if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
             info!("Cache hit for PID: {}", pid);
             return Ok(csv_path);
@@ -683,7 +675,8 @@ mod tests {
 
         // 2. Data not found (starts with D, contains "not found")
         let not_found_text = "Data not found for this cube";
-        let res = StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
+        let res =
+            StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
         assert!(res.is_err());
         match res.unwrap_err() {
             StatCanError::Api(msg) => assert!(msg.contains("StatCan API Error: Data not found")),
@@ -712,11 +705,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_get_cache_path_security() {
+    #[tokio::test]
+    async fn test_get_cache_path_security() {
         let client = StatCanClient::new().unwrap();
         // Should fail because of validation
-        let res = client.get_cache_path("../bad_path");
+        let res = client.get_cache_path("../bad_path").await;
         assert!(res.is_err());
         match res.unwrap_err() {
             StatCanError::Api(msg) => assert_eq!(msg, "Invalid PID format"),
@@ -724,7 +717,7 @@ mod tests {
         }
 
         // Should succeed for valid PID
-        let res_ok = client.get_cache_path("12345678");
+        let res_ok = client.get_cache_path("12345678").await;
         assert!(res_ok.is_ok());
     }
 }

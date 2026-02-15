@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use statcan_rs::{StatCanClient, StatCanClientTrait, StatCanError};
-use std::{convert::Infallible, io::BufRead, sync::{Arc, OnceLock}};
+use std::{
+    convert::Infallible,
+    io::BufRead,
+    sync::{Arc, OnceLock},
+};
 use tokio::sync::broadcast;
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
@@ -247,16 +251,17 @@ async fn handle_request<C: StatCanClientTrait>(
         })),
         "tools/call" => {
             let params = params.ok_or(JsonRpcError::new(-32602, "Missing params"))?;
-            let name = params["name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
+            let name = params["name"]
+                .as_str()
+                .ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
             let args = &params["arguments"];
 
             match name {
                 "list_cubes" => {
-                    let resp =
-                        client
-                            .get_all_cubes_list_lite()
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let resp = client
+                        .get_all_cubes_list_lite()
+                        .await
+                        .map_err(log_and_map_error)?;
                     // Truncate for brevity in LLM context? No, user wants list.
                     // But the list is HUGE (thousands). We should probably warn or truncate.
                     // For now, let's verify size.
@@ -276,7 +281,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "get_metadata" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
@@ -286,13 +293,17 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "get_cube_dimensions" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let resp = client
                         .get_cube_metadata(pid)
                         .await
                         .map_err(log_and_map_error)?;
 
-                    let metadata = resp.object.ok_or(JsonRpcError::new(-32000, "Table not found"))?;
+                    let metadata = resp
+                        .object
+                        .ok_or(JsonRpcError::new(-32000, "Table not found"))?;
 
                     let member_query_lower =
                         args["member_query"].as_str().map(|s| s.to_lowercase());
@@ -322,12 +333,13 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "search_cubes" => {
-                    let query = args["query"].as_str().ok_or(JsonRpcError::new(-32602, "Missing query"))?;
-                    let resp =
-                        client
-                            .get_all_cubes_list_lite()
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let query = args["query"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+                    let resp = client
+                        .get_all_cubes_list_lite()
+                        .await
+                        .map_err(log_and_map_error)?;
 
                     let all_cubes = resp.object.unwrap_or_default();
                     let terms: Vec<String> =
@@ -354,7 +366,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "fetch_data_by_vector" => {
-                    let vectors_val = args["vectors"].as_array().ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
+                    let vectors_val = args["vectors"]
+                        .as_array()
+                        .ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
                     let vectors: Vec<String> = vectors_val
                         .iter()
                         .map(|v| {
@@ -389,8 +403,12 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "fetch_data_by_coords" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
-                    let coords_val = args["coords"].as_array().ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let coords_val = args["coords"]
+                        .as_array()
+                        .ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
                     let coords: Vec<String> = coords_val
                         .iter()
                         .map(|v| {
@@ -425,7 +443,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     }
                 }
                 "search_cubes_by_dimension" => {
-                    let dim_name = args["dimension_name"].as_str().ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
+                    let dim_name = args["dimension_name"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
                     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
                     let results = client
@@ -451,7 +471,9 @@ async fn handle_request<C: StatCanClientTrait>(
                     )
                 }
                 "fetch_data_snippet" => {
-                    let pid = args["pid"].as_str().ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
+                    let pid = args["pid"]
+                        .as_str()
+                        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
                     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
                     let geo = args["geo"].as_str();
                     let recent_months = args["recent_months"].as_u64(); // Option<u64>
@@ -490,11 +512,10 @@ async fn handle_request<C: StatCanClientTrait>(
                         );
                     }
 
-                    let mut df_wrapper =
-                        client
-                            .fetch_full_table(pid)
-                            .await
-                            .map_err(log_and_map_error)?;
+                    let mut df_wrapper = client
+                        .fetch_full_table(pid)
+                        .await
+                        .map_err(log_and_map_error)?;
 
                     // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
                     if let Some(g) = geo {
@@ -505,14 +526,18 @@ async fn handle_request<C: StatCanClientTrait>(
                     if let Some(f) = filters {
                         for (col, val) in f {
                             if let Some(v_str) = val.as_str() {
-                                df_wrapper = df_wrapper.filter_column(col, v_str).map_err(log_and_map_error)?;
+                                df_wrapper = df_wrapper
+                                    .filter_column(col, v_str)
+                                    .map_err(log_and_map_error)?;
                             }
                         }
                     }
 
                     // Get recent periods (returns ALL rows for N most recent dates)
                     if let Some(n) = recent_months {
-                        df_wrapper = df_wrapper.take_recent_periods(n as usize).map_err(log_and_map_error)?;
+                        df_wrapper = df_wrapper
+                            .take_recent_periods(n as usize)
+                            .map_err(log_and_map_error)?;
                         // Sort descending so most recent data appears first
                         df_wrapper = df_wrapper.sort_date(true).map_err(log_and_map_error)?;
                     } else {
@@ -850,9 +875,7 @@ async fn sse_handler(
     let rx = state.sender.subscribe();
 
     // 1. Send the endpoint event immediately so the client knows where to POST
-    let endpoint_event = Event::default()
-        .event("endpoint")
-        .data("/mcp/messages");
+    let endpoint_event = Event::default().event("endpoint").data("/mcp/messages");
 
     // 2. Stream notifications/messages from the broadcast channel
     let notification_stream = stream::unfold(rx, |mut rx| async move {
