@@ -12,8 +12,10 @@ use crate::models::{
 };
 use ::zip::ZipArchive;
 use polars::prelude::*;
+use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
+use serde::{Serialize, Deserialize};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,7 +85,7 @@ pub trait StatCanClientTrait: Send + Sync {
     fn fetch_full_table(&self, pid: &str) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
 }
 
-impl StatCanClientTrait for StatCanClient {
+impl StatCanClientTrait for StatCanDriver {
     async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
         self.get_all_cubes_list_lite().await
     }
@@ -120,12 +122,47 @@ impl StatCanClientTrait for StatCanClient {
     }
 }
 
-pub struct StatCanClient {
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageMetadata {
+    pub id: String,
+    pub title: String,
+    pub notes: Option<String>,
+    pub url: Option<String>,
+    pub resources: Vec<ResourceMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceMetadata {
+    pub id: String,
+    pub name: String,
+    pub format: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DataHandler {
+    DatastoreQuery(String), // Resource ID
+    BlobDownload(String),   // URL
+}
+
+#[async_trait]
+pub trait CKANClient: Send + Sync {
+    async fn ping(&self) -> Result<String>;
+    async fn search_packages(&self, query: &str, limit: usize) -> Result<Vec<PackageMetadata>>;
+    async fn get_package_metadata(&self, id: &str) -> Result<PackageMetadata>;
+    async fn get_resource_handler(&self, resource_id: &str) -> Result<DataHandler>;
+    async fn query_datastore(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
+}
+
+pub type StatCanClient = StatCanDriver;
+
+pub struct StatCanDriver {
     client: Client,
     cubes_cache: Arc<RwLock<Option<Vec<Cube>>>>,
 }
 
-impl StatCanClient {
+impl StatCanDriver {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -624,6 +661,87 @@ impl StatCanClient {
         Ok(StatCanDataFrame::new(df))
     }
 }
+
+
+#[async_trait]
+impl CKANClient for StatCanDriver {
+    async fn ping(&self) -> Result<String> {
+        // Simple health check
+        let url = format!("{}/getAllCubesListLite", BASE_URL);
+        let resp = self.client.get(&url).send().await?;
+        if resp.status().is_success() {
+             Ok("StatCan WDS OK".to_string())
+        } else {
+             Err(StatCanError::Api(format!("Ping failed: {}", resp.status())))
+        }
+    }
+
+    async fn search_packages(&self, query: &str, limit: usize) -> Result<Vec<PackageMetadata>> {
+        let mut packages = Vec::new();
+
+        // 1. Try to find cubes by dimension name if query looks like a dimension.
+        let results = self.find_cubes_by_dimension(query, limit).await.unwrap_or_default();
+        for (pid, title, _) in results {
+            packages.push(PackageMetadata {
+                id: pid.clone(),
+                title: title,
+                notes: None,
+                url: None,
+                resources: vec![],
+            });
+        }
+
+        // If no results and query looks like PID, try fetching metadata directly
+        if packages.is_empty() && regex::Regex::new(r"^\d+$").unwrap().is_match(query) {
+             if let Ok(meta) = self.get_cube_metadata(query).await {
+                 if let Some(obj) = meta.object {
+                     packages.push(PackageMetadata {
+                         id: obj.product_id.clone(),
+                         title: obj.cube_title_en,
+                         notes: None,
+                         url: None,
+                         resources: vec![],
+                     });
+                 }
+             }
+        }
+
+        Ok(packages)
+    }
+
+    async fn get_package_metadata(&self, id: &str) -> Result<PackageMetadata> {
+        let meta = self.get_cube_metadata(id).await?;
+        let obj = meta.object.ok_or(StatCanError::TableNotFound)?;
+
+        // Construct a virtual CSV resource
+        let csv_resource = ResourceMetadata {
+            id: format!("{}-csv", obj.product_id),
+            name: format!("{} (CSV)", obj.cube_title_en),
+            format: Some("CSV".to_string()),
+            url: None,
+        };
+
+        Ok(PackageMetadata {
+            id: obj.product_id,
+            title: obj.cube_title_en,
+            notes: None,
+            url: None,
+            resources: vec![csv_resource],
+        })
+    }
+
+    async fn get_resource_handler(&self, resource_id: &str) -> Result<DataHandler> {
+        let pid = resource_id.trim_end_matches("-csv");
+        let metadata = self.get_full_cube_from_cube_pid(pid).await?;
+        let download_url = metadata.object.ok_or(StatCanError::TableNotFound)?;
+        Ok(DataHandler::BlobDownload(download_url))
+    }
+
+    async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
+        Err(StatCanError::Api("Datastore SQL queries not supported by StatCan WDS".to_string()))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
