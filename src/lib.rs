@@ -435,7 +435,7 @@ impl StatCanClient {
 
     async fn fetch_file_with_cache(&self, pid: &str) -> Result<std::path::PathBuf> {
         let csv_path = self.get_cache_path(pid);
-        if csv_path.exists() {
+        if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
             info!("Cache hit for PID: {}", pid);
             return Ok(csv_path);
         }
