@@ -10,6 +10,7 @@ use crate::models::{
     VectorDataResponse,
 };
 use ::zip::ZipArchive;
+use futures::future::join_all;
 use polars::prelude::*;
 use reqwest::Client;
 use serde_json::json;
@@ -140,37 +141,50 @@ impl StatCanClient {
         let mut results = Vec::new();
 
         // 3. Inspect Metadata for candidates
-        for cube in candidates {
-            // Respect user limit on RESULTS
+        // Process in chunks to limit concurrency and avoid 429s
+        for chunk in candidates.chunks(5) {
             if results.len() >= limit {
                 break;
             }
 
-            // Fetch metadata (might be slow loop, but constrained to 50 iterations max and breaks early)
-            // In a real app we might parallelize this with join_all
-            if let Ok(meta) = self.get_cube_metadata(&cube.product_id).await {
-                if let Some(obj) = meta.object {
-                    // Check if any dimension matches query strictly
-                    let has_dim = obj
-                        .dimension
-                        .iter()
-                        .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+            let futures = chunk
+                .iter()
+                .map(|cube| self.get_cube_metadata(&cube.product_id));
+            let chunk_results = join_all(futures).await;
 
-                    if has_dim {
-                        results.push((
-                            cube.product_id.clone(),
-                            cube.cube_title_en.clone(),
-                            // Return the specifically matching dimension name(s) joined?
-                            obj.dimension
-                                .iter()
-                                .filter(|d| {
-                                    d.dimension_name_en.to_lowercase().contains(&query_lower)
-                                })
-                                .map(|d| d.dimension_name_en.clone())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        ));
+            for (i, meta_res) in chunk_results.into_iter().enumerate() {
+                if results.len() >= limit {
+                    break;
+                }
+
+                let cube = chunk[i];
+
+                if let Ok(meta) = meta_res {
+                    if let Some(obj) = meta.object {
+                        // Check if any dimension matches query strictly
+                        let has_dim = obj
+                            .dimension
+                            .iter()
+                            .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+
+                        if has_dim {
+                            results.push((
+                                cube.product_id.clone(),
+                                cube.cube_title_en.clone(),
+                                // Return the specifically matching dimension name(s) joined?
+                                obj.dimension
+                                    .iter()
+                                    .filter(|d| {
+                                        d.dimension_name_en.to_lowercase().contains(&query_lower)
+                                    })
+                                    .map(|d| d.dimension_name_en.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            ));
+                        }
                     }
+                } else if let Err(e) = meta_res {
+                    tracing::warn!("Failed to fetch metadata for cube {}: {}", cube.product_id, e);
                 }
             }
         }
