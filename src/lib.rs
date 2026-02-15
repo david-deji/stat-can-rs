@@ -54,9 +54,7 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
 }
 
 pub trait StatCanClientTrait: Send + Sync {
-    fn get_all_cubes_list_lite(
-        &self,
-    ) -> impl Future<Output = Result<CubeListResponse>> + Send;
+    fn get_all_cubes_list_lite(&self) -> impl Future<Output = Result<CubeListResponse>> + Send;
     fn get_cube_metadata(
         &self,
         pid: &str,
@@ -81,10 +79,7 @@ pub trait StatCanClientTrait: Send + Sync {
         &self,
         pid: &str,
     ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
-    fn fetch_full_table(
-        &self,
-        pid: &str,
-    ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
+    fn fetch_full_table(&self, pid: &str) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
 }
 
 impl StatCanClientTrait for StatCanClient {
@@ -276,10 +271,7 @@ impl StatCanClient {
         pids: Vec<String>,
     ) -> Result<Vec<CubeMetadataResponse>> {
         let url = format!("{}/getCubeMetadata", BASE_URL);
-        let body_req: Vec<_> = pids
-            .iter()
-            .map(|pid| json!({ "productId": pid }))
-            .collect();
+        let body_req: Vec<_> = pids.iter().map(|pid| json!({ "productId": pid })).collect();
         let resp = self.client.post(&url).json(&body_req).send().await?;
 
         let body_resp = self.parse_statcan_response(resp).await?;
@@ -683,7 +675,8 @@ mod tests {
 
         // 2. Data not found (starts with D, contains "not found")
         let not_found_text = "Data not found for this cube";
-        let res = StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
+        let res =
+            StatCanClient::parse_response_body(reqwest::StatusCode::NOT_FOUND, not_found_text);
         assert!(res.is_err());
         match res.unwrap_err() {
             StatCanError::Api(msg) => assert!(msg.contains("StatCan API Error: Data not found")),

@@ -163,7 +163,8 @@ mod tests {
             "productId": 98765
         }"#;
 
-        let cube: Cube = serde_json::from_str(json_data).expect("Failed to deserialize Cube with int productId");
+        let cube: Cube =
+            serde_json::from_str(json_data).expect("Failed to deserialize Cube with int productId");
         assert_eq!(cube.product_id, "98765");
         assert_eq!(cube.cube_title_en, "Test Cube");
     }
@@ -176,7 +177,8 @@ mod tests {
             "productId": "98765"
         }"#;
 
-        let cube: Cube = serde_json::from_str(json_data).expect("Failed to deserialize Cube with string productId");
+        let cube: Cube = serde_json::from_str(json_data)
+            .expect("Failed to deserialize Cube with string productId");
         assert_eq!(cube.product_id, "98765");
         assert_eq!(cube.cube_title_en, "Test Cube");
     }
