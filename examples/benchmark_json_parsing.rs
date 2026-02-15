@@ -68,12 +68,18 @@ fn main() {
     println!("Original:  {:.2?}", duration_original);
     println!("Optimized: {:.2?}", duration_optimized);
 
-     let diff = duration_original.as_secs_f64() - duration_optimized.as_secs_f64();
-     if diff > 0.0 {
-         println!("Improvement: {:.2}%", diff / duration_original.as_secs_f64() * 100.0);
-     } else {
-         println!("Regression: {:.2}%", -diff / duration_original.as_secs_f64() * 100.0);
-     }
+    let diff = duration_original.as_secs_f64() - duration_optimized.as_secs_f64();
+    if diff > 0.0 {
+        println!(
+            "Improvement: {:.2}%",
+            diff / duration_original.as_secs_f64() * 100.0
+        );
+    } else {
+        println!(
+            "Regression: {:.2}%",
+            -diff / duration_original.as_secs_f64() * 100.0
+        );
+    }
 }
 
 // Mimic existing implementation
@@ -81,30 +87,28 @@ fn run_original(body: Value) -> Result<Vec<VectorDataResponse>, String> {
     if body.is_object() {
         // Clone 1 + Deserialize 1
         if let Ok(err_resp) = serde_json::from_value::<StatCanErrorResponse>(body.clone()) {
-             let mut is_error = false;
-             let mut status_msg = "FAILED".to_string();
+            let mut is_error = false;
+            let mut status_msg = "FAILED".to_string();
 
-             if let Some(s) = &err_resp.status {
-                 if s != "SUCCESS" {
-                     is_error = true;
-                     status_msg = s.clone();
-                 }
-             } else if let Some(msg) = &err_resp.message {
-                 is_error = true;
-                 status_msg = msg.clone();
-             }
+            if let Some(s) = &err_resp.status {
+                if s != "SUCCESS" {
+                    is_error = true;
+                    status_msg = s.clone();
+                }
+            } else if let Some(msg) = &err_resp.message {
+                is_error = true;
+                status_msg = msg.clone();
+            }
 
-             if is_error {
-                 return Err(status_msg);
-             }
+            if is_error {
+                return Err(status_msg);
+            }
         }
     }
 
     // Clone 2 + Deserialize 2
     // We clone because in real code we use 'body' in map_err
-    serde_json::from_value(body.clone()).map_err(|_| {
-        format!("Failed JSON body: {}", body)
-    })
+    serde_json::from_value(body.clone()).map_err(|_| format!("Failed JSON body: {}", body))
 }
 
 fn run_optimized(body: Value) -> Result<Vec<VectorDataResponse>, String> {
@@ -114,27 +118,27 @@ fn run_optimized(body: Value) -> Result<Vec<VectorDataResponse>, String> {
         let mut status_msg = "FAILED".to_string();
 
         if let Some(s) = body.get("status").and_then(|v| v.as_str()) {
-             if s != "SUCCESS" {
-                 is_error = true;
-                 status_msg = s.to_string();
-             }
+            if s != "SUCCESS" {
+                is_error = true;
+                status_msg = s.to_string();
+            }
         } else if let Some(msg) = body.get("message").and_then(|v| v.as_str()) {
-             // Original logic: else if let Some(msg) = &err_resp.message
-             // Note: Original code checks message ONLY if status is NOT present (because of else if)
-             // Wait, original:
-             // if let Some(s) = &err_resp.status { if s!=SUCCESS { is_error=true } }
-             // else if let Some(msg) = &err_resp.message { is_error=true }
+            // Original logic: else if let Some(msg) = &err_resp.message
+            // Note: Original code checks message ONLY if status is NOT present (because of else if)
+            // Wait, original:
+            // if let Some(s) = &err_resp.status { if s!=SUCCESS { is_error=true } }
+            // else if let Some(msg) = &err_resp.message { is_error=true }
 
-             // This means:
-             // 1. If status is present:
-             //    - If "SUCCESS": is_error = false. Message is IGNORED.
-             //    - If != "SUCCESS": is_error = true.
-             // 2. If status is MISSING:
-             //    - If message is present: is_error = true.
-             //    - If message is missing: is_error = false.
+            // This means:
+            // 1. If status is present:
+            //    - If "SUCCESS": is_error = false. Message is IGNORED.
+            //    - If != "SUCCESS": is_error = true.
+            // 2. If status is MISSING:
+            //    - If message is present: is_error = true.
+            //    - If message is missing: is_error = false.
 
-             is_error = true;
-             status_msg = msg.to_string();
+            is_error = true;
+            status_msg = msg.to_string();
         }
 
         if is_error {
@@ -143,7 +147,5 @@ fn run_optimized(body: Value) -> Result<Vec<VectorDataResponse>, String> {
     }
 
     // Clone 2 + Deserialize 2
-    serde_json::from_value(body.clone()).map_err(|_| {
-        format!("Failed JSON body: {}", body)
-    })
+    serde_json::from_value(body.clone()).map_err(|_| format!("Failed JSON body: {}", body))
 }
