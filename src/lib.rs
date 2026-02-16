@@ -45,15 +45,20 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
+    let parts_count = c.split('.').count();
+
+    if parts_count < 10 {
+        let needed = 10 - parts_count;
+        // Pre-allocate buffer: current length + needed * 2 chars (".0")
+        let mut padded_string = String::with_capacity(c.len() + needed * 2);
+        padded_string.push_str(c);
         for _ in 0..needed {
             padded_string.push_str(".0");
         }
+        padded_string
+    } else {
+        c.to_string()
     }
-    padded_string
 }
 
 pub trait StatCanClientTrait: CKANClient + Send + Sync {
@@ -176,7 +181,15 @@ impl StatCanDriver {
     }
 
     fn extract_data_points(responses: Vec<VectorDataResponse>) -> Vec<DataPoint> {
-        let mut all_points = Vec::new();
+        // Pre-calculate total size to avoid reallocations
+        let total_count: usize = responses
+            .iter()
+            .filter(|r| r.status == "SUCCESS")
+            .filter_map(|r| r.object.as_ref())
+            .map(|obj| obj.vector_data_point.len())
+            .sum();
+
+        let mut all_points = Vec::with_capacity(total_count);
         for r in responses {
             if r.status == "SUCCESS" {
                 if let Some(obj) = r.object {
