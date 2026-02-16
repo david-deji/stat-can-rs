@@ -493,7 +493,7 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
         );
     }
 
-    let mut df_wrapper = client.fetch_full_table(pid).await?;
+    let mut df_wrapper = client.fetch_full_table_scan(pid).await?;
 
     // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
     if let Some(g) = geo {
@@ -521,7 +521,7 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     }
 
     // Format output as JSON
-    let mut df = df_wrapper.into_polars();
+    let mut df = df_wrapper.collect()?.into_polars();
     let mut buf = Vec::new();
     polars::prelude::JsonWriter::new(&mut buf)
         .with_json_format(polars::prelude::JsonFormat::Json)

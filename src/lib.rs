@@ -5,7 +5,7 @@ pub mod python;
 pub mod security;
 pub mod wrapper;
 
-pub use wrapper::StatCanDataFrame;
+pub use wrapper::{StatCanDataFrame, StatCanLazyFrame};
 
 use crate::models::{
     Cube, CubeListResponse, CubeMetadataResponse, DataPoint, DataResponse, Dimension,
@@ -84,6 +84,10 @@ pub trait StatCanClientTrait: CKANClient + Send + Sync {
         pid: &str,
     ) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
     fn fetch_full_table(&self, pid: &str) -> impl Future<Output = Result<StatCanDataFrame>> + Send;
+    fn fetch_full_table_scan(
+        &self,
+        pid: &str,
+    ) -> impl Future<Output = Result<StatCanLazyFrame>> + Send;
 }
 
 impl StatCanClientTrait for StatCanDriver {
@@ -120,6 +124,9 @@ impl StatCanClientTrait for StatCanDriver {
     }
     async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
         self.fetch_full_table(pid).await
+    }
+    async fn fetch_full_table_scan(&self, pid: &str) -> Result<StatCanLazyFrame> {
+        self.fetch_full_table_scan(pid).await
     }
 }
 
@@ -663,6 +670,21 @@ impl StatCanDriver {
 
         Ok(StatCanDataFrame::new(df))
     }
+
+    pub async fn fetch_full_table_scan(&self, pid: &str) -> Result<StatCanLazyFrame> {
+        Self::validate_pid(pid)?;
+        let csv_path = self.fetch_file_with_cache(pid).await?;
+
+        // LazyCsvReader creation is cheap (just opens file and reads header), so we can do it here.
+        // However, Polars operations are usually blocking, so we should be careful.
+        // Creating the LazyFrame handle itself is fast.
+        let lf = LazyCsvReader::new(csv_path)
+            .has_header(true)
+            .with_infer_schema_length(Some(100))
+            .finish()?;
+
+        Ok(StatCanLazyFrame::new(lf))
+    }
 }
 
 #[async_trait]
@@ -1202,6 +1224,33 @@ impl StatCanClientTrait for GenericCKANDriver {
         .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         Ok(StatCanDataFrame::new(df))
+    }
+
+    async fn fetch_full_table_scan(&self, pid: &str) -> Result<StatCanLazyFrame> {
+        // 1. Get Resource Handler
+        let handler = self.get_resource_handler(pid).await?;
+
+        let url = match handler {
+            DataHandler::BlobDownload(u) => u,
+            DataHandler::DatastoreQuery(_, Some(u)) => u,
+            DataHandler::DatastoreQuery(_, None) => {
+                return Err(StatCanError::Api(
+                    "Cannot fetch full table from Datastore query: no download URL available"
+                        .to_string(),
+                ))
+            }
+        };
+
+        // 2. Download
+        let csv_path = download_and_extract_file(&self.client, &url, pid).await?;
+
+        // 3. Lazy Scan
+        let lf = LazyCsvReader::new(csv_path)
+            .has_header(true)
+            .with_infer_schema_length(Some(100))
+            .finish()?;
+
+        Ok(StatCanLazyFrame::new(lf))
     }
 }
 

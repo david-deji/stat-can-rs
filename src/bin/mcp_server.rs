@@ -31,7 +31,7 @@ use uuid::Uuid;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Port to listen on (if not set, runs in stdio mode)
-    #[arg(short, long, env = "MCP_PORT")]
+    #[arg(short, long, env = "PORT")]
     port: Option<u16>,
 
     /// Transport mode: stdio (default) or sse
