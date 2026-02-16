@@ -1,39 +1,31 @@
 use axum::{
-    extract::{Json, Request, State},
-    http::{HeaderMap, StatusCode},
-    middleware::{self, Next},
+    extract::{Json, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{
-        sse::{Event, Sse},
-        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
     },
-    routing::{get, post},
+    routing::post,
     Router,
 };
 use clap::Parser;
 use futures::stream::{self, StreamExt};
-use polars::prelude::IntoLazy;
-use polars::prelude::SerReader;
-use polars::prelude::SerWriter;
-use polars::sql::SQLContext;
-use postgrest::Postgrest;
-use rand::thread_rng;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use statcan_rs::security::generate_api_key;
-use statcan_rs::{CKANClient, StatCanClient, StatCanClientTrait, StatCanError};
+use governor::{Quota, RateLimiter};
+use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
+use statcan_rs::StatCanClient;
 use std::{
     collections::HashMap,
     convert::Infallible,
-    env,
     io::BufRead,
-    sync::{Arc, OnceLock, RwLock},
-    time::{Duration, Instant},
+    num::NonZeroU32,
+    sync::{Arc, RwLock},
+    time::Instant,
 };
 use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,6 +33,10 @@ struct Args {
     /// Port to listen on (if not set, runs in stdio mode)
     #[arg(short, long, env = "MCP_PORT")]
     port: Option<u16>,
+
+    /// Transport mode: stdio (default) or sse
+    #[arg(long, env = "ONET_TRANSPORT")]
+    transport: Option<String>,
 
     /// API Key for HTTP authentication
     #[arg(long, env = "MCP_API_KEY")]
@@ -70,860 +66,27 @@ async fn main() -> anyhow::Result<()> {
         "https://open.canada.ca/data/en",
     )?);
 
-    if let Some(port) = args.port {
+    // Determine mode
+    let is_sse = args.transport.as_deref() == Some("sse") || args.port.is_some();
+
+    if is_sse {
+        let port = args.port.unwrap_or(3000);
         info!("Starting MCP server in HTTP/SSE mode on port {}", port);
-        http_mode(port, args.api_key, client, open_data_client).await?;
+        run_sse_server(port, args.api_key, client, open_data_client).await?;
     } else {
         info!(
             "Starting MCP server in Stdio mode (Rate Limit: {}/min)",
             args.rate_limit
         );
-        stdio_mode(client, open_data_client, args.rate_limit).await?;
+        run_stdio_server(client, open_data_client, args.rate_limit).await?;
     }
 
     Ok(())
 }
 
-// --- Protocol Types ---
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[serde(rename = "jsonrpc")]
-    _jsonrpc: String,
-    method: String,
-    params: Option<Value>,
-    id: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-impl JsonRpcResponse {
-    fn from_result(result: Result<Value, JsonRpcError>, id: Option<Value>) -> Self {
-        match result {
-            Ok(res) => Self {
-                jsonrpc: "2.0".to_string(),
-                result: Some(res),
-                error: None,
-                id,
-            },
-            Err(err) => Self {
-                jsonrpc: "2.0".to_string(),
-                result: None,
-                error: Some(err),
-                id,
-            },
-        }
-    }
-}
-
-impl JsonRpcError {
-    fn new(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<StatCanError> for JsonRpcError {
-    fn from(e: StatCanError) -> Self {
-        match e {
-            StatCanError::TableNotFound => JsonRpcError::new(-32000, "Table not found"),
-            StatCanError::Api(ref msg)
-                if msg == "Invalid PID format" || msg == "PID cannot be empty" =>
-            {
-                JsonRpcError::new(-32602, msg.clone())
-            }
-            e => {
-                error!("Internal error: {:?}", e);
-                JsonRpcError::new(-32000, "Internal server error")
-            }
-        }
-    }
-}
-
-// --- Core Logic ---
-
-fn list_tools() -> Result<Value, JsonRpcError> {
-    Ok(json!({
-        "tools": [
-            {
-                "name": "list_cubes",
-                "description": "List all available data cubes (summary)",
-                "inputSchema": { "type": "object", "properties": {} }
-            },
-            {
-                "name": "get_metadata",
-                "description": "Get metadata for a specific cube",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID of the cube (e.g. 18100004)" }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "get_cube_dimensions",
-                "description": "Get valid dimensions and members for a cube. Use this to find what 'Geography' or 'Products' filters are available.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "member_query": { "type": "string", "description": "Optional text to filter member names" }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "search_cubes",
-                "description": "Search for cubes by title (supports multi-word queries)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query (e.g. 'labour ontario')" }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "fetch_data_by_vector",
-                "description": "Fetch specific data points by Vector ID (e.g. v123456). Most precise method.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "vectors": { "type": "array", "items": { "type": "string" }, "description": "List of Vector IDs" },
-                        "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
-                    },
-                    "required": ["vectors"]
-                }
-            },
-            {
-                "name": "fetch_data_by_coords",
-                "description": "Fetch specific data points by Coordinate string (e.g. '1.1.1.1.1').",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "coords": { "type": "array", "items": { "type": "string" }, "description": "List of Coordinate strings" },
-                        "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
-                    },
-                    "required": ["pid", "coords"]
-                }
-            },
-            {
-                "name": "search_cubes_by_dimension",
-                "description": "Find cubes that contain a specific dimension name (e.g. 'Geography', 'NAICS'). Useful for finding relevant data sets when you know the dimension you need.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "dimension_name": { "type": "string", "description": "Dimension name to search for (case-insensitive substring)" },
-                        "limit": { "type": "integer", "description": "Max number of cubes to return (default 10)" }
-                    },
-                    "required": ["dimension_name"]
-                }
-            },
-            {
-                "name": "fetch_data_snippet",
-                "description": "Fetch data from a cube. Supports filtering by Geography and getting the most recent N periods. Results are sorted most-recent-first by default. Filters use exact match first, falling back to substring.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "rows": { "type": "integer", "description": "Number of rows to return (default 5). Results are always sorted most-recent-first." },
-                        "geo": { "type": "string", "description": "Filter by Geography (e.g. 'Canada', 'British Columbia')" },
-                        "recent_months": { "type": "integer", "description": "Get ALL rows for the last N time periods. Returns every row (all geographies, industries, etc.) matching those periods." },
-                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs for column filtering. Uses exact match first, then substring fallback (e.g. {'Products and product groups': 'Energy'} matches 'Energy' exactly, not 'All-items excluding energy')" }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "search_open_data",
-                "description": "Search the Canadian Open Government portal for datasets.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query (keywords)" },
-                        "limit": { "type": "integer", "description": "Max results (default 10)" }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "get_open_data_metadata",
-                "description": "Get detailed metadata for a specific dataset from the Open Government portal.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string", "description": "The Dataset (Package) ID" }
-                    },
-                    "required": ["id"]
-                }
-            },
-            {
-                "name": "query_open_data_datastore",
-                "description": "Execute an SQL query against the Canadian Open Government Datastore (for datasets with 'datastore_active'=true).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "sql": { "type": "string", "description": "The SQL query to execute (e.g. 'SELECT * FROM \"resource_id\" LIMIT 5'). Note: Table names must be the Resource ID in double quotes." }
-                    },
-                    "required": ["sql"]
-                }
-            },
-            {
-                "name": "fetch_open_data_resource_snippet",
-                "description": "Fetch a small snippet of data from an Open Government resource (CSV) for previewing. Supports SQL queries and column selection.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "resource_id": { "type": "string", "description": "The Resource ID to fetch" },
-                        "rows": { "type": "integer", "description": "Number of rows to return (default 5)" },
-                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs to filter by column (case-insensitive substring match). Use column names from the CSV header." },
-                        "columns": { "type": "array", "items": { "type": "string" }, "description": "List of columns to return. If omitted, all columns are returned." },
-                        "sql": { "type": "string", "description": "Optional SQL query to run against the data. Use 'data' as the table name. Example: SELECT * FROM data WHERE \"Salary Minimum\" > 25" }
-                    },
-                    "required": ["resource_id"]
-                }
-            },
-            {
-                "name": "get_open_data_resource_schema",
-                "description": "Get the schema (column names and types) for an Open Government resource.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "resource_id": { "type": "string", "description": "The Resource ID to fetch schema for" }
-                    },
-                    "required": ["resource_id"]
-                }
-            }
-        ]
-    }))
-}
-
-async fn handle_list_cubes<C: StatCanClientTrait>(
-    client: Arc<C>,
-    _args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let resp = client.get_all_cubes_list_lite().await?;
-    let count = resp.object.as_ref().map(|v| v.len()).unwrap_or(0);
-    if count > 100 {
-        let mut cubes = resp.object.unwrap();
-        cubes.truncate(50);
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&cubes).unwrap() }] }),
-        )
-    } else {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp).unwrap() }] }),
-        )
-    }
-}
-
-async fn handle_get_metadata<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let pid = args["pid"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
-    let resp = client.get_cube_metadata(pid).await?;
-    Ok(
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
-    )
-}
-
-async fn handle_get_cube_dimensions<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let pid = args["pid"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
-    let resp = client.get_cube_metadata(pid).await?;
-
-    let metadata = resp
-        .object
-        .ok_or(JsonRpcError::new(-32000, "Table not found"))?;
-
-    let member_query_lower = args["member_query"].as_str().map(|s| s.to_lowercase());
-
-    // Simplify output: Map Dimension Name -> List of Member Names
-    let simplified: std::collections::HashMap<String, Vec<String>> = metadata
-        .dimension
-        .into_iter()
-        .map(|d| {
-            let members: Vec<String> = d
-                .member
-                .into_iter()
-                .map(|m| format!("{} (ID: {})", m.member_name_en, m.member_id))
-                .filter(|name| {
-                    member_query_lower
-                        .as_ref()
-                        .map(|q| name.to_lowercase().contains(q))
-                        .unwrap_or(true)
-                })
-                .collect();
-            (d.dimension_name_en, members)
-        })
-        .collect();
-
-    Ok(
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&simplified).unwrap() }] }),
-    )
-}
-
-async fn handle_search_cubes<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let query = args["query"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
-    let resp = client.get_all_cubes_list_lite().await?;
-
-    let all_cubes = resp.object.unwrap_or_default();
-    let terms: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
-
-    let results: Vec<&statcan_rs::models::Cube> = all_cubes
-        .iter()
-        .filter(|c| {
-            let title_lower = c.cube_title_en.to_lowercase();
-            // ALL terms must be present (AND logic)
-            terms.iter().all(|term| title_lower.contains(term))
-        })
-        .take(100)
-        .collect();
-
-    if results.is_empty() {
-        Ok(json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }))
-    } else {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results).unwrap() }] }),
-        )
-    }
-}
-
-async fn handle_fetch_data_by_vector<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let vectors_val = args["vectors"]
-        .as_array()
-        .ok_or(JsonRpcError::new(-32602, "Missing vectors array"))?;
-    let vectors: Vec<String> = vectors_val
-        .iter()
-        .map(|v| {
-            if let Some(s) = v.as_str() {
-                s.to_string()
-            } else {
-                v.to_string()
-            }
-        })
-        .collect();
-
-    let periods = args["recent_periods"].as_i64().unwrap_or(1) as i32;
-
-    let resp = client.get_data_from_vectors(vectors, periods).await?;
-    if resp.status != "SUCCESS" {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
-        )
-    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
-        )
-    } else {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
-        )
-    }
-}
-
-async fn handle_fetch_data_by_coords<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let pid = args["pid"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
-    let coords_val = args["coords"]
-        .as_array()
-        .ok_or(JsonRpcError::new(-32602, "Missing coords array"))?;
-    let coords: Vec<String> = coords_val
-        .iter()
-        .map(|v| {
-            if let Some(s) = v.as_str() {
-                s.to_string()
-            } else {
-                v.to_string()
-            }
-        })
-        .collect();
-
-    let periods = args["recent_periods"].as_i64().unwrap_or(1) as i32;
-
-    let resp = client.get_data_from_coords(pid, coords, periods).await?;
-    if resp.status != "SUCCESS" {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
-        )
-    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
-        )
-    } else {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&resp.object).unwrap() }] }),
-        )
-    }
-}
-
-async fn handle_search_cubes_by_dimension<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let dim_name = args["dimension_name"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing dimension_name"))?;
-    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
-
-    let results = client.find_cubes_by_dimension(dim_name, limit).await?;
-
-    // Format results nicely
-    // Result: Vec<(pid, title, matching_dims)>
-    let output_json = json!(results
-        .iter()
-        .map(|(pid, title, dims)| {
-            json!({
-                "productId": pid,
-                "title": title,
-                "matching_dimensions": dims
-            })
-        })
-        .collect::<Vec<_>>());
-
-    Ok(
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&output_json).unwrap() }] }),
-    )
-}
-
-async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let pid = args["pid"]
-        .as_str()
-        .or_else(|| args["resource_id"].as_str())
-        .ok_or(JsonRpcError::new(-32602, "Missing pid or resource_id"))?;
-    let rows = args["rows"].as_u64().unwrap_or(5) as usize;
-    let geo = args["geo"].as_str();
-    let recent_months = args["recent_months"].as_u64(); // Option<u64>
-    let filters = args["filters"].as_object(); // Option<&Map>
-
-    // OPTIMIZATION: If no filters and no geo, try fast snippet first
-    if geo.is_none() && filters.is_none() && recent_months.unwrap_or(1) <= 1 && rows <= 5 {
-        if let Ok(df) = client.fetch_fast_snippet(pid).await {
-            if df.as_polars().height() > 0 {
-                let mut polars_df = df.into_polars();
-                let mut buf = Vec::new();
-                polars::prelude::JsonWriter::new(&mut buf)
-                    .with_json_format(polars::prelude::JsonFormat::Json)
-                    .finish(&mut polars_df)
-                    .map_err(|e| {
-                        error!("Serialization error: {}", e);
-                        JsonRpcError::new(-32000, "Internal server error")
-                    })?;
-
-                let output = String::from_utf8(buf).map_err(|e| {
-                    error!("UTF-8 error: {}", e);
-                    JsonRpcError::new(-32000, "Internal server error")
-                })?;
-                return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
-            }
-        }
-        info!(
-            "Fast snippet failed or empty for {}, falling back to full download.",
-            pid
-        );
-    }
-
-    let mut df_wrapper = client.fetch_full_table(pid).await?;
-
-    // Filter by Geography if provided (Fuzzy Match enabled in wrapper)
-    if let Some(g) = geo {
-        df_wrapper = df_wrapper.filter_geo(g)?;
-    }
-
-    // Apply generic filters (Fuzzy Match enabled in wrapper)
-    if let Some(f) = filters {
-        for (col, val) in f {
-            if let Some(v_str) = val.as_str() {
-                df_wrapper = df_wrapper.filter_column(col, v_str)?;
-            }
-        }
-    }
-
-    // Get recent periods (returns ALL rows for N most recent dates)
-    if let Some(n) = recent_months {
-        df_wrapper = df_wrapper.take_recent_periods(n as usize)?;
-        // Sort descending so most recent data appears first
-        df_wrapper = df_wrapper.sort_date(true)?;
-    } else {
-        // Default: sort descending (most recent first) then take N rows
-        df_wrapper = df_wrapper.sort_date(true)?;
-        df_wrapper = df_wrapper.take_n(rows)?;
-    }
-
-    // Format output as JSON
-    let mut df = df_wrapper.into_polars();
-    let mut buf = Vec::new();
-    polars::prelude::JsonWriter::new(&mut buf)
-        .with_json_format(polars::prelude::JsonFormat::Json)
-        .finish(&mut df)
-        .map_err(|e| {
-            error!("Serialization error: {}", e);
-            JsonRpcError::new(-32000, "Internal server error")
-        })?;
-
-    let output = String::from_utf8(buf).map_err(|e| {
-        error!("UTF-8 error: {}", e);
-        JsonRpcError::new(-32000, "Internal server error")
-    })?;
-    Ok(json!({ "content": [{ "type": "text", "text": output }] }))
-}
-
-async fn handle_search_open_data<C: CKANClient>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let query = args["query"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
-    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
-
-    let packages = client.search_packages(query, limit).await.map_err(|e| {
-        error!("Open Data search failed: {}", e);
-        JsonRpcError::new(-32000, format!("Open Data search failed: {}", e))
-    })?;
-
-    if packages.is_empty() {
-        Ok(json!({ "content": [{ "type": "text", "text": "No datasets found matching query." }] }))
-    } else {
-        Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&packages).unwrap() }] }),
-        )
-    }
-}
-
-async fn handle_get_open_data_metadata<C: CKANClient>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let id = args["id"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing id"))?;
-
-    let meta = client.get_package_metadata(id).await.map_err(|e| {
-        error!("Get metadata failed: {}", e);
-        JsonRpcError::new(-32000, format!("Get metadata failed: {}", e))
-    })?;
-
-    Ok(
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&meta).unwrap() }] }),
-    )
-}
-
-async fn handle_query_open_data_datastore<C: CKANClient>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let sql = args["sql"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing sql"))?;
-
-    let records = client.query_datastore(sql).await.map_err(|e| {
-        error!("Datastore query failed: {}", e);
-        JsonRpcError::new(-32000, format!("Datastore query failed: {}", e))
-    })?;
-
-    // Format output (limit size if needed, but client limits via SQL usually)
-    Ok(
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&records).unwrap() }] }),
-    )
-}
-
-async fn handle_fetch_open_data_snippet<C: CKANClient>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let resource_id = args["resource_id"]
-        .as_str()
-        .ok_or(JsonRpcError::new(-32602, "Missing resource_id"))?;
-
-    let rows = args["rows"].as_u64().unwrap_or(5) as usize;
-
-    // 1. Get the resource handler to find the download URL
-    info!("Looking up resource: {}", resource_id);
-    let handler = client
-        .get_resource_handler(resource_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to get resource handler for {}: {}", resource_id, e);
-            JsonRpcError::new(-32000, format!("Failed to look up resource: {}", e))
-        })?;
-
-    let download_url = match handler {
-        statcan_rs::DataHandler::BlobDownload(url) => url,
-        statcan_rs::DataHandler::DatastoreQuery(_, Some(url)) => url,
-        statcan_rs::DataHandler::DatastoreQuery(_, None) => {
-            return Err(JsonRpcError::new(
-                -32000,
-                "Resource has no download URL available",
-            ));
-        }
-    };
-
-    info!("Downloading Open Data CSV from: {}", download_url);
-
-    // 2. Download the CSV with a longer timeout (these files can be large)
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .gzip(true)
-        .build()
-        .map_err(|e| {
-            error!("Failed to build HTTP client: {}", e);
-            JsonRpcError::new(-32000, format!("HTTP client error: {}", e))
-        })?;
-
-    // 2. Download/Extract using library helper (supports caching and ZIP)
-    let temp_path = statcan_rs::download_and_extract_file(&http_client, &download_url, resource_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to download/extract resource {}: {}", resource_id, e);
-            JsonRpcError::new(-32000, format!("Download failed: {}", e))
-        })?;
-
-    // 4. Parse with Polars, apply filters, take N rows
-    let rows_limit = rows;
-    let filters_owned: Option<Vec<(String, String)>> =
-        args.get("filters").and_then(|v| v.as_object()).map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        });
-
-    let columns_owned: Option<Vec<String>> = args["columns"].as_array().map(|arr| {
-        arr.iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect()
-    });
-
-    let sql_query = args["sql"].as_str().map(|s| s.to_string());
-
-    // Detect delimiter
-    let separator = {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&temp_path).map_err(|e| {
-            error!("Failed to open temp file for inspection: {}", e);
-            JsonRpcError::new(-32000, "Internal server error")
-        })?;
-        let mut buffer = [0u8; 4096];
-        let n = file.read(&mut buffer).unwrap_or(0);
-        let slice = &buffer[..n];
-
-        let commas = slice.iter().filter(|&&c| c == b',').count();
-        let tabs = slice.iter().filter(|&&c| c == b'\t').count();
-
-        if tabs > commas {
-            b'\t'
-        } else {
-            b','
-        }
-    };
-    info!("Detected separator: '{}'", separator as char);
-
-    let temp_path_clone = temp_path.clone();
-    let df_result = tokio::task::spawn_blocking(
-        move || -> std::result::Result<polars::prelude::DataFrame, String> {
-            let reader = polars::prelude::CsvReader::from_path(&temp_path_clone)
-                .map_err(|e| format!("Failed to open CSV: {}", e))?;
-
-            let df = reader
-                .infer_schema(Some(100))
-                .has_header(true)
-                .with_separator(separator)
-                .with_ignore_errors(true) // Skip rows with encoding/parsing errors
-                .truncate_ragged_lines(true)
-                .finish()
-                .map_err(|e| format!("CSV parse error: {}", e))?;
-
-            info!("Parsed CSV: {} rows x {} cols", df.height(), df.width());
-
-            let mut result = df;
-
-            // Apply filters if provided
-            if let Some(ref filter_pairs) = filters_owned {
-                // ... same filter logic ...
-                for (col_name, col_val) in filter_pairs {
-                    let col_lower = col_name.to_lowercase();
-                    let val_lower = col_val.to_lowercase();
-                    let actual_col = result
-                        .get_column_names()
-                        .iter()
-                        .find(|c| c.to_lowercase() == col_lower)
-                        .map(|c| c.to_string());
-
-                    if let Some(col) = actual_col {
-                        let series = result
-                            .column(&col)
-                            .map_err(|e| format!("Column error: {}", e))?;
-                        let str_series = series
-                            .cast(&polars::prelude::DataType::String)
-                            .map_err(|e| format!("Cast error: {}", e))?;
-                        let ca = str_series.str().map_err(|e| format!("Str error: {}", e))?;
-                        let mask = ca
-                            .into_iter()
-                            .map(|opt_val| {
-                                opt_val.map_or(false, |v| v.to_lowercase().contains(&val_lower))
-                            })
-                            .collect::<polars::prelude::BooleanChunked>();
-                        result = result
-                            .filter(&mask)
-                            .map_err(|e| format!("Filter error: {}", e))?;
-                    }
-                }
-            }
-
-            // Apply SQL if provided
-            if let Some(sql) = sql_query {
-                let mut ctx = SQLContext::new();
-                ctx.register("data", result.clone().lazy());
-                let sql_df = ctx.execute(&sql).map_err(|e| format!("SQL error: {}", e))?;
-                result = sql_df
-                    .collect()
-                    .map_err(|e| format!("SQL collection error: {}", e))?;
-            }
-
-            // Select columns if provided
-            if let Some(cols) = columns_owned {
-                result = result
-                    .select(&cols)
-                    .map_err(|e| format!("Selection error: {}", e))?;
-            }
-
-            let take = std::cmp::min(rows_limit, result.height());
-            Ok(result.head(Some(take)))
-        },
-    )
-    .await
-    .map_err(|e| {
-        error!("Task join error: {}", e);
-        JsonRpcError::new(-32000, format!("Processing error: {}", e))
-    })?
-    .map_err(|e| {
-        error!("CSV processing failed: {}", e);
-        JsonRpcError::new(-32000, e)
-    })?;
-
-    // Clean up temp file
-    let _ = tokio::fs::remove_file(&temp_path).await;
-
-    // 5. Serialize to JSON
-    let mut df = df_result;
-    let mut buf = Vec::new();
-    polars::prelude::JsonWriter::new(&mut buf)
-        .with_json_format(polars::prelude::JsonFormat::Json)
-        .finish(&mut df)
-        .map_err(|e| {
-            error!("Serialization error: {}", e);
-            JsonRpcError::new(-32000, format!("Serialization error: {}", e))
-        })?;
-
-    let output = String::from_utf8(buf).map_err(|e| {
-        error!("UTF-8 error: {}", e);
-        JsonRpcError::new(-32000, format!("Encoding error: {}", e))
-    })?;
-
-    Ok(json!({ "content": [{ "type": "text", "text": output }] }))
-}
-
-async fn handle_request<C: StatCanClientTrait, O: CKANClient + StatCanClientTrait>(
-    client: Arc<C>,
-    od_client: Arc<O>,
-    method: &str,
-    params: Option<Value>,
-) -> anyhow::Result<Value, JsonRpcError> {
-    match method {
-        "tools/list" => list_tools(),
-        "tools/call" => {
-            let params = params.ok_or(JsonRpcError::new(-32602, "Missing params"))?;
-            let name = params["name"]
-                .as_str()
-                .ok_or(JsonRpcError::new(-32602, "Missing tool name"))?;
-            let args = &params["arguments"];
-
-            match name {
-                "list_cubes" => handle_list_cubes(client, args).await,
-                "get_metadata" => handle_get_metadata(client, args).await,
-                "get_cube_dimensions" => handle_get_cube_dimensions(client, args).await,
-                "search_cubes" => handle_search_cubes(client, args).await,
-                "fetch_data_by_vector" => handle_fetch_data_by_vector(client, args).await,
-                "fetch_data_by_coords" => handle_fetch_data_by_coords(client, args).await,
-                "search_cubes_by_dimension" => handle_search_cubes_by_dimension(client, args).await,
-                "fetch_data_snippet" => handle_fetch_data_snippet(client, args).await,
-                "search_open_data" => handle_search_open_data(od_client, args).await,
-                "get_open_data_metadata" => handle_get_open_data_metadata(od_client, args).await,
-                "query_open_data_datastore" => {
-                    handle_query_open_data_datastore(od_client, args).await
-                }
-                "fetch_open_data_resource_snippet" => {
-                    handle_fetch_open_data_snippet(od_client, args).await
-                }
-                "get_open_data_resource_schema" => {
-                    handle_get_open_data_resource_schema(od_client, args).await
-                }
-                _ => Err(JsonRpcError::new(-32601, "Tool not found")),
-            }
-        }
-        "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
-            "serverInfo": {
-                "name": "stat-can-rs",
-                "version": "0.1.0"
-            },
-            "capabilities": {
-                "tools": {}
-            }
-        })),
-        "notifications/initialized" => Ok(Value::Null),
-        "ping" => Ok(json!({})),
-        _ => Err(JsonRpcError::new(-32601, "Method not found")),
-    }
-}
-
 // --- Stdio Mode ---
 
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
-
-async fn stdio_mode(
+async fn run_stdio_server(
     client: Arc<StatCanClient>,
     od_client: Arc<statcan_rs::GenericCKANDriver>,
     rate_limit_per_min: u32,
@@ -946,9 +109,6 @@ async fn stdio_mode(
 
         // Enforce Rate Limit
         if limiter.check().is_err() {
-            // If rate limited, we should probably return an error JSON-RPC response
-            // asking the client to back off, or just block.
-            // Blocking is better for stdio as it acts as backpressure.
             limiter.until_ready().await;
         }
 
@@ -970,7 +130,6 @@ async fn stdio_mode(
             }
             Err(e) => {
                 error!("Failed to parse request: {}", e);
-                // Send parse error?
             }
         }
 
@@ -979,246 +138,111 @@ async fn stdio_mode(
     Ok(())
 }
 
-// --- HTTP Mode ---
+// --- SSE Mode ---
 
-struct AuthCacheEntry {
-    expires_at: Instant,
-}
-
-struct AuthCache {
-    entries: RwLock<HashMap<String, AuthCacheEntry>>,
-    ttl: Duration,
-}
-
-impl AuthCache {
-    fn new(ttl_secs: u64) -> Self {
-        Self {
-            entries: RwLock::new(HashMap::new()),
-            ttl: Duration::from_secs(ttl_secs),
-        }
-    }
-
-    fn is_valid(&self, key_hash: &str) -> bool {
-        let map = self.entries.read().unwrap();
-        if let Some(entry) = map.get(key_hash) {
-            if entry.expires_at > Instant::now() {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn add(&self, key_hash: String) {
-        let mut map = self.entries.write().unwrap();
-        map.insert(
-            key_hash,
-            AuthCacheEntry {
-                expires_at: Instant::now() + self.ttl,
-            },
-        );
-    }
-}
-
-#[derive(Clone)]
 #[allow(dead_code)]
+struct Session {
+    id: String,
+    created_at: Instant,
+}
+
 struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
-    supabase: Option<Arc<Postgrest>>,
-    use_supabase: bool,
-    legacy_key: Option<String>,
-    auth_cache: Arc<AuthCache>,
+    sessions: Arc<RwLock<HashMap<String, Session>>>,
 }
 
-static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn is_valid_email(email: &str) -> bool {
-    let re = EMAIL_REGEX.get_or_init(|| {
-        Regex::new(r"^(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$").unwrap()
-    });
-    if !re.is_match(email) {
-        return false;
-    }
-    // Additional checks for common pitfalls not easily caught by simple regex
-    if email.contains("..")
-        || email.starts_with('.')
-        || email
-            .split('@')
-            .next()
-            .map(|s| s.ends_with('.'))
-            .unwrap_or(false)
-    {
-        return false;
-    }
-    true
-}
-
-#[derive(serde::Deserialize)]
-struct RegisterRequest {
-    email: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct RegisterResponse {
-    api_key: String,
-    message: String,
-}
-
-async fn handle_register(
-    State(state): State<AppState>,
-    Json(payload): Json<RegisterRequest>,
-) -> impl IntoResponse {
-    if !state.use_supabase {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({"error": "Registration not enabled"})),
-        );
-    }
-
-    // Validate email format if provided
-    if let Some(email) = &payload.email {
-        if !is_valid_email(email) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid email format"})),
-            );
-        }
-    }
-
-    // Generate API Key: sk_live_<hex_secret>
-    let (api_key, key_hash) = generate_api_key(&mut thread_rng());
-
-    // Store in Supabase
-    let supabase = state.supabase.as_ref().unwrap();
-    let body = json!({
-        "key_hash": key_hash,
-        "email": payload.email,
-    });
-
-    let resp = supabase
-        .from("api_keys")
-        .insert(body.to_string())
-        .execute()
-        .await;
-
-    match resp {
-        Ok(r) => {
-            if r.status().is_success() {
-                (
-                    StatusCode::OK,
-                    Json(json!(RegisterResponse {
-                        api_key,
-                        message: "Store this key safely. It will not be shown again.".to_string()
-                    })),
-                )
-            } else {
-                error!("Supabase insert failed: {}", r.status());
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Database error"})),
-                )
-            }
-        }
-        Err(e) => {
-            error!("Supabase error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database error"})),
-            )
-        }
-    }
-}
-
-async fn http_mode(
+async fn run_sse_server(
     port: u16,
-    args_api_key: Option<String>, // Legacy single key
+    _api_key: Option<String>,
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
-    // Supabase Config
-    let sb_url = std::env::var("SUPABASE_URL").ok();
-    let sb_key = std::env::var("SUPABASE_KEY").ok();
-
-    let (supabase, use_supabase) = if let (Some(url), Some(key)) = (sb_url, sb_key) {
-        let base_url = if url.ends_with("/rest/v1") || url.ends_with("/rest/v1/") {
-            url
-        } else {
-            format!("{}/rest/v1", url.trim_end_matches('/'))
-        };
-        info!(
-            "Supabase integration enabled for Key Management at {}",
-            base_url
-        );
-        (
-            Some(Arc::new(
-                Postgrest::new(base_url).insert_header("apikey", key),
-            )),
-            true,
-        )
-    } else {
-        (None, false)
-    };
-
-    let auth_cache = Arc::new(AuthCache::new(300));
-
     let state = AppState {
         client,
         open_data_client,
-        supabase,
-        use_supabase,
-        legacy_key: args_api_key,
-        auth_cache,
+        sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 
-    let cors = tower_http::cors::CorsLayer::new()
+    let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::OPTIONS,
-        ])
-        .allow_headers([
-            axum::http::HeaderName::from_static("authorization"),
-            axum::http::HeaderName::from_static("content-type"),
-        ]);
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
 
     let app = Router::new()
-        .route("/mcp", get(sse_handler).post(handle_http_message)) // Streamable HTTP: same path for GET (SSE) and POST (JSON-RPC)
-        .route("/mcp/messages", post(handle_http_message)) // Legacy SSE message endpoint
-        .route("/mcp/sse", get(sse_handler)) // Legacy SSE endpoint
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
-        .route("/register", post(handle_register)) // Public
+        .route(
+            "/sse",
+            post(handle_sse_post)
+                .get(handle_sse_get)
+                .delete(handle_sse_delete),
+        )
+        .route("/messages", post(handle_sse_post)) // Legacy alias?
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(state);
+        .with_state(Arc::new(state));
 
-    // ... rest of function ...
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    // Bind to dual-stack
+    let addr = format!("[::]:{}", port);
+    info!("Listening on {}", addr);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(_) => {
+            // Fallback to IPv4 if IPv6 fails
+            let addr4 = format!("0.0.0.0:{}", port);
+            info!("IPv6 bind failed, falling back to {}", addr4);
+            TcpListener::bind(&addr4).await?
+        }
+    };
+
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-// Auth Middleware
-async fn auth_middleware(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    // Auth disabled — allow all requests through
-    Ok(next.run(request).await)
-}
-
-async fn handle_http_message(
-    State(state): State<AppState>,
-    _headers: HeaderMap,
+async fn handle_sse_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let is_initialize = req.method == "initialize";
     let is_notification = req.id.is_none();
+
+    let session_id = if is_initialize {
+        let new_id = Uuid::new_v4().to_string();
+        let mut sessions = state.sessions.write().unwrap();
+        sessions.insert(
+            new_id.clone(),
+            Session {
+                id: new_id.clone(),
+                created_at: Instant::now(),
+            },
+        );
+        Some(new_id)
+    } else {
+        // Validate session
+        if let Some(id_val) = headers.get("mcp-session-id") {
+            if let Ok(id) = id_val.to_str() {
+                let sessions = state.sessions.read().unwrap();
+                if sessions.contains_key(id) {
+                    Some(id.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if !is_initialize && session_id.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Mcp-Session-Id header",
+        )
+            .into_response();
+    }
 
     let result = handle_request(
         state.client.clone(),
@@ -1229,26 +253,38 @@ async fn handle_http_message(
     .await;
 
     if is_notification {
-        return StatusCode::NO_CONTENT.into_response();
+        return StatusCode::ACCEPTED.into_response();
     }
 
     let resp = JsonRpcResponse::from_result(result, req.id);
     let mut response = Json(resp).into_response();
 
-    // For initialize requests, include a session ID per Streamable HTTP spec
-    if is_initialize {
-        let session_id = uuid::Uuid::new_v4().to_string();
-        response.headers_mut().insert(
-            "Mcp-Session-Id",
-            axum::http::HeaderValue::from_str(&session_id).unwrap(),
-        );
+    response
+        .headers_mut()
+        .insert("Content-Type", HeaderValue::from_static("application/json"));
+
+    if let Some(sid) = session_id {
+        response
+            .headers_mut()
+            .insert("Mcp-Session-Id", HeaderValue::from_str(&sid).unwrap());
     }
 
     response
 }
 
-async fn sse_handler(State(_state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    // Build absolute URL for the endpoint event
+async fn handle_sse_get(
+    State(_state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if headers.get("mcp-session-id").is_some() {
+        // Streamable HTTP: no notification stream needed (unless we implement server push)
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    // Legacy SSE: create session + stream with endpoint event
+    // For legacy clients that expect SSE immediately without Mcp-Session-Id header on GET
+    // We should probably just return an endpoint event pointing to POST /sse
+
     let host = headers
         .get("host")
         .and_then(|h| h.to_str().ok())
@@ -1258,394 +294,35 @@ async fn sse_handler(State(_state): State<AppState>, headers: HeaderMap) -> impl
     } else {
         "https"
     };
-    // Point to the unified /mcp endpoint for message POSTs
-    let endpoint_url = format!("{}://{}/mcp", scheme, host);
+    let endpoint_url = format!("{}://{}/sse", scheme, host);
 
-    /*
-    // 1. Send the endpoint event immediately so the client knows where to POST
-    let endpoint_event = Event::default()
-        .event("endpoint")
-        .json_data(endpoint_url)
-        .unwrap();
-    */
+    // Initial event: endpoint
+    let endpoint_event = Event::default().event("endpoint").data(format!(
+        "{}?sessionId={}",
+        endpoint_url,
+        Uuid::new_v4()
+    )); // Legacy clients might expect sessionId param
 
-    // 2. Keep the stream open
+    // Keep the stream open but send nothing else
     let pending = stream::pending::<Result<Event, Infallible>>();
+    let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
 
-    // let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
-    let stream = pending;
-
-    let mut res = Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::default())
-        .into_response();
-
-    res.headers_mut().insert(
-        "X-Accel-Buffering",
-        axum::http::HeaderValue::from_static("no"),
-    );
-    res.headers_mut().insert(
-        "Cache-Control",
-        axum::http::HeaderValue::from_static("no-cache"),
-    );
-
-    res
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
-async fn handle_get_open_data_resource_schema<C: StatCanClientTrait>(
-    client: Arc<C>,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let resource_id = args["resource_id"]
-        .as_str()
-        .ok_or_else(|| JsonRpcError::new(-32602, "resource_id is required"))?;
-
-    let schema = client.get_resource_schema(resource_id).await.map_err(|e| {
-        error!("Failed to get schema for {}: {}", resource_id, e);
-        JsonRpcError::new(-32000, format!("Failed to get schema: {}", e))
-    })?;
-
-    Ok(json!({
-        "resource_id": resource_id,
-        "schema": schema.into_iter().map(|(n, t)| json!({"name": n, "type": t})).collect::<Vec<Value>>()
-    }))
-}
-
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use polars::prelude::*;
-    use statcan_rs::CKANClient;
-    use statcan_rs::{
-        models::{
-            Cube, CubeListResponse, CubeMetadata, CubeMetadataResponse, DataResponse, Dimension,
-            Member,
-        },
-        Result, StatCanDataFrame, StatCanError,
-    };
-
-    struct MockStatCanClient;
-
-    #[async_trait]
-    impl CKANClient for MockStatCanClient {
-        async fn ping(&self) -> Result<String> {
-            Ok("Mock OK".to_string())
-        }
-        async fn search_packages(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> Result<Vec<statcan_rs::PackageMetadata>> {
-            Ok(vec![])
-        }
-        async fn get_package_metadata(&self, id: &str) -> Result<statcan_rs::PackageMetadata> {
-            Ok(statcan_rs::PackageMetadata {
-                id: id.to_string(),
-                title: "Mock Package".to_string(),
-                notes: None,
-                url: None,
-                resources: vec![],
-            })
-        }
-        async fn get_resource_handler(
-            &self,
-            _resource_id: &str,
-        ) -> Result<statcan_rs::DataHandler> {
-            Ok(statcan_rs::DataHandler::DatastoreQuery(
-                "mock".to_string(),
-                None,
-            ))
-        }
-        async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        async fn get_resource_schema(&self, _resource_id: &str) -> Result<Vec<(String, String)>> {
-            Ok(vec![])
-        }
-    }
-
-    impl StatCanClientTrait for MockStatCanClient {
-        async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse> {
-            Ok(CubeListResponse {
-                status: "SUCCESS".to_string(),
-                object: Some(vec![Cube {
-                    product_id: "98765432".to_string(),
-                    cube_title_en: "Mocked Cube Title".to_string(),
-                    cube_pid: Some("98765432".to_string()),
-                }]),
-            })
-        }
-
-        async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
-            if pid == "error" {
-                return Err(StatCanError::Api("Internal server error".to_string()));
+async fn handle_sse_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(id_val) = headers.get("mcp-session-id") {
+        if let Ok(id) = id_val.to_str() {
+            let mut sessions = state.sessions.write().unwrap();
+            if sessions.remove(id).is_some() {
+                return StatusCode::OK.into_response();
             }
-            Ok(CubeMetadataResponse {
-                status: "SUCCESS".to_string(),
-                object: Some(CubeMetadata {
-                    product_id: pid.to_string(),
-                    cube_title_en: "Mocked Cube".to_string(),
-                    dimension: vec![Dimension {
-                        dimension_name_en: "Geography".to_string(),
-                        position_id: 1,
-                        member: vec![Member {
-                            member_id: 1,
-                            member_name_en: "Canada".to_string(),
-                            classification_code: Some("11124".to_string()),
-                        }],
-                    }],
-                }),
-            })
-        }
-
-        async fn find_cubes_by_dimension(
-            &self,
-            dim_query: &str,
-            _limit: usize,
-        ) -> Result<Vec<(String, String, String)>> {
-            Ok(vec![(
-                "12345".to_string(),
-                "Found Cube".to_string(),
-                dim_query.to_string(),
-            )])
-        }
-
-        async fn get_data_from_vectors(
-            &self,
-            _vectors: Vec<String>,
-            _periods: i32,
-        ) -> Result<DataResponse> {
-            Ok(DataResponse {
-                status: "SUCCESS".to_string(),
-                object: Some(vec![]),
-            })
-        }
-
-        async fn get_data_from_coords(
-            &self,
-            _pid: &str,
-            _coords: Vec<String>,
-            _periods: i32,
-        ) -> Result<DataResponse> {
-            Ok(DataResponse {
-                status: "SUCCESS".to_string(),
-                object: Some(vec![]),
-            })
-        }
-
-        async fn fetch_fast_snippet(&self, _pid: &str) -> Result<StatCanDataFrame> {
-            Ok(StatCanDataFrame::new(DataFrame::default()))
-        }
-
-        async fn fetch_full_table(&self, _pid: &str) -> Result<StatCanDataFrame> {
-            Ok(StatCanDataFrame::new(DataFrame::default()))
         }
     }
-
-    #[test]
-    fn test_email_validation() {
-        // Valid emails
-        assert!(is_valid_email("test@example.com"));
-        assert!(is_valid_email("user.name@domain.co.uk"));
-        assert!(is_valid_email("user+tag@example.com"));
-        assert!(is_valid_email("1234567890@example.com"));
-        assert!(is_valid_email("email@example-one.com"));
-
-        // Invalid emails
-        assert!(!is_valid_email("plainaddress"));
-        assert!(!is_valid_email("#@%^%#$@#$@#.com"));
-        assert!(!is_valid_email("@example.com"));
-        assert!(!is_valid_email("Joe Smith <email@example.com>"));
-        assert!(!is_valid_email("email.example.com"));
-        assert!(!is_valid_email("email@example@example.com"));
-        assert!(!is_valid_email(".email@example.com"));
-        assert!(!is_valid_email("email.@example.com"));
-        assert!(!is_valid_email("email..email@example.com"));
-        assert!(!is_valid_email("あいうえお@example.com"));
-        assert!(!is_valid_email("email@example.com (Joe Smith)"));
-        assert!(!is_valid_email("email@example"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_tools_list() {
-        let client = Arc::new(MockStatCanClient);
-        let od_client = Arc::new(MockStatCanClient);
-        let resp = handle_request(client, od_client, "tools/list", None).await;
-        assert!(resp.is_ok());
-        let val = resp.unwrap();
-        let tools = val["tools"].as_array();
-        assert!(tools.is_some());
-        assert!(!tools.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_list_cubes() {
-        let client = Arc::new(MockStatCanClient);
-        let od_client = Arc::new(MockStatCanClient);
-        let params = json!({
-            "name": "list_cubes",
-            "arguments": {}
-        });
-        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
-        assert!(resp.is_ok());
-        let val = resp.unwrap();
-        let content = val["content"].as_array().unwrap();
-        let text = content[0]["text"].as_str().unwrap();
-        assert!(text.contains("Mocked Cube Title"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_get_metadata() {
-        let client = Arc::new(MockStatCanClient);
-        let od_client = Arc::new(MockStatCanClient);
-        let params = json!({
-            "name": "get_metadata",
-            "arguments": { "pid": "12345" }
-        });
-        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
-        assert!(resp.is_ok());
-        let val = resp.unwrap();
-        let content = val["content"].as_array().unwrap();
-        let text = content[0]["text"].as_str().unwrap();
-        assert!(text.contains("Mocked Cube"));
-        assert!(text.contains("Geography"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_error_handling() {
-        let client = Arc::new(MockStatCanClient);
-        let od_client = Arc::new(MockStatCanClient);
-        // Test missing params
-        let resp = handle_request(client.clone(), od_client.clone(), "tools/call", None).await;
-        assert!(resp.is_err());
-        assert_eq!(resp.unwrap_err().code, -32602);
-
-        // Test API error propagation
-        let params = json!({
-            "name": "get_metadata",
-            "arguments": { "pid": "error" }
-        });
-        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
-        assert!(resp.is_err());
-        let err = resp.unwrap_err();
-        assert_eq!(err.code, -32000);
-        assert_eq!(err.message, "Internal server error");
-    }
-
-    /*
-    #[tokio::test]
-    async fn test_handle_request_search_open_data() {
-        let client = Arc::new(MockStatCanClient);
-        let od_client = Arc::new(MockStatCanClient);
-        let params = json!({
-            "name": "search_open_data",
-            "arguments": { "query": "test" }
-        });
-        let resp = handle_request(client, od_client, "tools/call", Some(params)).await;
-        assert!(resp.is_ok());
-    }
-    */
-
-    #[tokio::test]
-    async fn test_auth_middleware_legacy_key() {
-        use axum::{
-            body::Body,
-            http::{Request, StatusCode},
-            middleware,
-            routing::get,
-            Router,
-        };
-        use tower::ServiceExt;
-
-        // Use real client since AppState requires concrete StatCanClient
-        // This is safe because auth_middleware doesn't use the client.
-        let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let open_data_client = Arc::new(
-            statcan_rs::GenericCKANDriver::new("https://open.canada.ca/data/en")
-                .expect("Failed to create client"),
-        );
-        let auth_cache = Arc::new(AuthCache::new(300));
-
-        let state = AppState {
-            client,
-            open_data_client,
-            supabase: None,
-            use_supabase: false,
-            legacy_key: Some("secret-key".to_string()),
-            auth_cache,
-        };
-
-        let app = Router::new()
-            .route("/", get(|| async { "OK" }))
-            .route_layer(middleware::from_fn_with_state(state, auth_middleware));
-
-        // 1. Valid Key
-        let req = Request::builder()
-            .uri("/")
-            .header("Authorization", "Bearer secret-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        // 2. Invalid Key
-        let req = Request::builder()
-            .uri("/")
-            .header("Authorization", "Bearer wrong-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK); // Auth currently disabled
-    }
-
-    #[tokio::test]
-    async fn test_auth_cache_hit() {
-        use axum::{
-            body::Body,
-            http::{Request, StatusCode},
-            middleware,
-            routing::get,
-            Router,
-        };
-        use tower::ServiceExt;
-
-        // Use real client since AppState requires concrete StatCanClient
-        let client = Arc::new(StatCanClient::new().expect("Failed to create client"));
-        let open_data_client = Arc::new(
-            statcan_rs::GenericCKANDriver::new("https://open.canada.ca/data/en")
-                .expect("Failed to create client"),
-        );
-
-        let auth_cache = Arc::new(AuthCache::new(300));
-        let valid_key = "test-key";
-        let mut hasher = Sha256::new();
-        hasher.update(valid_key.as_bytes());
-        let key_hash = hex::encode(hasher.finalize());
-
-        // Populate Cache Manually
-        auth_cache.add(key_hash);
-
-        let state = AppState {
-            client,
-            open_data_client,
-            supabase: None, // Missing client would cause panic if accessed
-            use_supabase: true,
-            legacy_key: None,
-            auth_cache,
-        };
-
-        let app = Router::new()
-            .route("/", get(|| async { "OK" }))
-            .route_layer(middleware::from_fn_with_state(state, auth_middleware));
-
-        // 1. Valid Key (in Cache)
-        let req = Request::builder()
-            .uri("/")
-            .header("Authorization", format!("Bearer {}", valid_key))
-            .body(Body::empty())
-            .unwrap();
-
-        // This should SUCCEED because cache is hit. If cache missed, it would hit supabase logic and panic on unwrap().
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
+    StatusCode::NOT_FOUND.into_response()
 }

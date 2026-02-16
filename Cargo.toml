@@ -39,7 +39,8 @@ crossbeam-channel = "0.5" # For SSE channel
 tower_governor = "0.4"
 governor = "0.6"
 postgrest = "1.6"
-uuid = { version = "=1.10.0", features = ["v4", "serde"] }
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
+async-stream = "0.3"
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"

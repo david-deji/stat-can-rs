@@ -1,3 +1,4 @@
+pub mod handlers;
 pub mod models;
 #[cfg(feature = "python")]
 pub mod python;
@@ -7,7 +8,7 @@ pub mod wrapper;
 pub use wrapper::StatCanDataFrame;
 
 use crate::models::{
-    Cube, CubeListResponse, CubeMetadata, CubeMetadataResponse, DataPoint, DataResponse, Dimension,
+    Cube, CubeListResponse, CubeMetadataResponse, DataPoint, DataResponse, Dimension,
     FullTableResponse, VectorDataResponse,
 };
 use ::zip::ZipArchive;
@@ -166,7 +167,7 @@ pub struct StatCanDriver {
 impl StatCanDriver {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .gzip(true)
             .build()?;
         Ok(Self {
