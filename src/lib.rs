@@ -153,6 +153,7 @@ pub trait CKANClient: Send + Sync {
     async fn get_package_metadata(&self, id: &str) -> Result<PackageMetadata>;
     async fn get_resource_handler(&self, resource_id: &str) -> Result<DataHandler>;
     async fn query_datastore(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
+    async fn get_resource_schema(&self, resource_id: &str) -> Result<Vec<(String, String)>>;
 }
 
 pub type StatCanClient = StatCanDriver;
@@ -745,6 +746,18 @@ impl CKANClient for StatCanDriver {
             "Datastore SQL queries not supported by StatCan WDS".to_string(),
         ))
     }
+
+    async fn get_resource_schema(&self, resource_id: &str) -> Result<Vec<(String, String)>> {
+        // For StatCan, we can infer schema from the full table if downloaded
+        let df = self.fetch_full_table(resource_id).await?;
+        let polars_df = df.into_polars();
+        let schema = polars_df.schema();
+        let mut result = Vec::new();
+        for field in schema.iter_fields() {
+            result.push((field.name().to_string(), format!("{:?}", field.dtype)));
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Clone)]
@@ -981,6 +994,17 @@ impl CKANClient for GenericCKANDriver {
 
         Ok(records.clone())
     }
+
+    async fn get_resource_schema(&self, resource_id: &str) -> Result<Vec<(String, String)>> {
+        let df = self.fetch_full_table(resource_id).await?;
+        let polars_df = df.into_polars();
+        let schema = polars_df.schema();
+        let mut result = Vec::new();
+        for field in schema.iter_fields() {
+            result.push((field.name().to_string(), format!("{:?}", field.dtype)));
+        }
+        Ok(result)
+    }
 }
 
 pub async fn download_and_extract_file(
@@ -988,6 +1012,14 @@ pub async fn download_and_extract_file(
     url: &str,
     pid: &str,
 ) -> Result<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = std::path::PathBuf::from(home).join(".cache/statcan-rs/resources");
+        let cached_path = cache_dir.join(format!("{}.csv", pid));
+        if tokio::fs::try_exists(&cached_path).await.unwrap_or(false) {
+            return Ok(cached_path);
+        }
+    }
+
     let mut path = std::env::temp_dir();
     path.push("statcan");
     tokio::fs::create_dir_all(&path).await.unwrap_or(());
@@ -1042,7 +1074,6 @@ pub async fn download_and_extract_file(
         .map_err(|e| StatCanError::Io(std::io::Error::other(e)))??;
 
         let _ = tokio::fs::remove_file(zip_path).await;
-        Ok(csv_path)
     } else {
         // Assume direct CSV download
         let mut out_file = tokio::fs::File::create(&csv_path).await?;
@@ -1051,8 +1082,17 @@ pub async fn download_and_extract_file(
             out_file.write_all(&chunk).await?;
         }
         out_file.sync_all().await?;
-        Ok(csv_path)
     }
+
+    // Copy to persistent cache if possible
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = std::path::PathBuf::from(home).join(".cache/statcan-rs/resources");
+        let _ = tokio::fs::create_dir_all(&cache_dir).await;
+        let cached_path = cache_dir.join(format!("{}.csv", pid));
+        let _ = tokio::fs::copy(&csv_path, &cached_path).await;
+    }
+
+    Ok(csv_path)
 }
 
 impl StatCanClientTrait for GenericCKANDriver {
