@@ -46,13 +46,17 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
-        for _ in 0..needed {
-            padded_string.push_str(".0");
-        }
+    // Optimization: Count iterator instead of collecting into Vec
+    let count = c.split('.').count();
+    if count >= 10 {
+        return c.to_string();
+    }
+    let needed = 10 - count;
+    // Optimization: Pre-calculate capacity
+    let mut padded_string = String::with_capacity(c.len() + needed * 2);
+    padded_string.push_str(c);
+    for _ in 0..needed {
+        padded_string.push_str(".0");
     }
     padded_string
 }
@@ -184,7 +188,14 @@ impl StatCanDriver {
     }
 
     fn extract_data_points(responses: Vec<VectorDataResponse>) -> Vec<DataPoint> {
-        let mut all_points = Vec::new();
+        // Optimization: Pre-calculate total points to allocate exact capacity
+        let total_points: usize = responses.iter()
+            .filter(|r| r.status == "SUCCESS")
+            .filter_map(|r| r.object.as_ref())
+            .map(|obj| obj.vector_data_point.len())
+            .sum();
+
+        let mut all_points = Vec::with_capacity(total_points);
         for r in responses {
             if r.status == "SUCCESS" {
                 if let Some(obj) = r.object {
