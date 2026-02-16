@@ -11,8 +11,10 @@ use axum::{
 };
 use clap::Parser;
 use futures::stream::{self, StreamExt};
+use polars::prelude::IntoLazy;
 use polars::prelude::SerReader;
 use polars::prelude::SerWriter;
+use polars::sql::SQLContext;
 use postgrest::Postgrest;
 use rand::thread_rng;
 use regex::Regex;
@@ -287,13 +289,26 @@ fn list_tools() -> Result<Value, JsonRpcError> {
             },
             {
                 "name": "fetch_open_data_resource_snippet",
-                "description": "Fetch a small snippet of data from an Open Government resource (CSV) for previewing.",
+                "description": "Fetch a small snippet of data from an Open Government resource (CSV) for previewing. Supports SQL queries and column selection.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "resource_id": { "type": "string", "description": "The Resource ID to fetch" },
                         "rows": { "type": "integer", "description": "Number of rows to return (default 5)" },
-                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs to filter by column (case-insensitive substring match). Use column names from the CSV header." }
+                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs to filter by column (case-insensitive substring match). Use column names from the CSV header." },
+                        "columns": { "type": "array", "items": { "type": "string" }, "description": "List of columns to return. If omitted, all columns are returned." },
+                        "sql": { "type": "string", "description": "Optional SQL query to run against the data. Use 'data' as the table name. Example: SELECT * FROM data WHERE \"Salary Minimum\" > 25" }
+                    },
+                    "required": ["resource_id"]
+                }
+            },
+            {
+                "name": "get_open_data_resource_schema",
+                "description": "Get the schema (column names and types) for an Open Government resource.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "resource_id": { "type": "string", "description": "The Resource ID to fetch schema for" }
                     },
                     "required": ["resource_id"]
                 }
@@ -663,7 +678,6 @@ async fn handle_fetch_open_data_snippet<C: CKANClient>(
         .ok_or(JsonRpcError::new(-32602, "Missing resource_id"))?;
 
     let rows = args["rows"].as_u64().unwrap_or(5) as usize;
-    let filters = args["filters"].as_object(); // Optional key-value filters
 
     // 1. Get the resource handler to find the download URL
     info!("Looking up resource: {}", resource_id);
@@ -698,41 +712,31 @@ async fn handle_fetch_open_data_snippet<C: CKANClient>(
             JsonRpcError::new(-32000, format!("HTTP client error: {}", e))
         })?;
 
-    let resp = http_client.get(&download_url).send().await.map_err(|e| {
-        error!("Failed to download CSV: {}", e);
-        JsonRpcError::new(-32000, format!("Download failed: {}", e))
-    })?;
-
-    if !resp.status().is_success() {
-        return Err(JsonRpcError::new(
-            -32000,
-            format!("Download failed: HTTP {}", resp.status()),
-        ));
-    }
-
-    // 3. Stream body to temp file (avoids holding entire file in memory)
-    let temp_path = std::env::temp_dir().join(format!("opendata_{}.csv", resource_id));
-    {
-        let bytes = resp.bytes().await.map_err(|e| {
-            error!("Failed to read response body: {}", e);
-            JsonRpcError::new(-32000, format!("Failed to read data: {}", e))
+    // 2. Download/Extract using library helper (supports caching and ZIP)
+    let temp_path = statcan_rs::download_and_extract_file(&http_client, &download_url, resource_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to download/extract resource {}: {}", resource_id, e);
+            JsonRpcError::new(-32000, format!("Download failed: {}", e))
         })?;
-        info!("Downloaded {} bytes from Open Data", bytes.len());
-        tokio::fs::write(&temp_path, &bytes).await.map_err(|e| {
-            error!("Failed to write temp CSV: {}", e);
-            JsonRpcError::new(-32000, format!("Failed to save data: {}", e))
-        })?;
-    }
 
     // 4. Parse with Polars, apply filters, take N rows
     let rows_limit = rows;
-    let filters_owned: Option<Vec<(String, String)>> = filters.map(|f| {
-        f.iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+    let filters_owned: Option<Vec<(String, String)>> =
+        args.get("filters").and_then(|v| v.as_object()).map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        });
+
+    let columns_owned: Option<Vec<String>> = args["columns"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     });
 
-    // Detect delimiter
+    let sql_query = args["sql"].as_str().map(|s| s.to_string());
+
     // Detect delimiter
     let separator = {
         use std::io::Read;
@@ -772,14 +776,14 @@ async fn handle_fetch_open_data_snippet<C: CKANClient>(
 
             info!("Parsed CSV: {} rows x {} cols", df.height(), df.width());
 
-            // Apply filters if provided
             let mut result = df;
+
+            // Apply filters if provided
             if let Some(ref filter_pairs) = filters_owned {
+                // ... same filter logic ...
                 for (col_name, col_val) in filter_pairs {
                     let col_lower = col_name.to_lowercase();
                     let val_lower = col_val.to_lowercase();
-
-                    // Find the actual column name (case-insensitive)
                     let actual_col = result
                         .get_column_names()
                         .iter()
@@ -787,7 +791,6 @@ async fn handle_fetch_open_data_snippet<C: CKANClient>(
                         .map(|c| c.to_string());
 
                     if let Some(col) = actual_col {
-                        // Cast column to string and do case-insensitive contains
                         let series = result
                             .column(&col)
                             .map_err(|e| format!("Column error: {}", e))?;
@@ -806,6 +809,23 @@ async fn handle_fetch_open_data_snippet<C: CKANClient>(
                             .map_err(|e| format!("Filter error: {}", e))?;
                     }
                 }
+            }
+
+            // Apply SQL if provided
+            if let Some(sql) = sql_query {
+                let mut ctx = SQLContext::new();
+                ctx.register("data", result.clone().lazy());
+                let sql_df = ctx.execute(&sql).map_err(|e| format!("SQL error: {}", e))?;
+                result = sql_df
+                    .collect()
+                    .map_err(|e| format!("SQL collection error: {}", e))?;
+            }
+
+            // Select columns if provided
+            if let Some(cols) = columns_owned {
+                result = result
+                    .select(&cols)
+                    .map_err(|e| format!("Selection error: {}", e))?;
             }
 
             let take = std::cmp::min(rows_limit, result.height());
@@ -875,6 +895,9 @@ async fn handle_request<C: StatCanClientTrait, O: CKANClient + StatCanClientTrai
                 }
                 "fetch_open_data_resource_snippet" => {
                     handle_fetch_open_data_snippet(od_client, args).await
+                }
+                "get_open_data_resource_schema" => {
+                    handle_get_open_data_resource_schema(od_client, args).await
                 }
                 _ => Err(JsonRpcError::new(-32601, "Tool not found")),
             }
@@ -1268,7 +1291,25 @@ async fn sse_handler(State(_state): State<AppState>, headers: HeaderMap) -> impl
     res
 }
 
-#[cfg(test)]
+async fn handle_get_open_data_resource_schema<C: StatCanClientTrait>(
+    client: Arc<C>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let resource_id = args["resource_id"]
+        .as_str()
+        .ok_or_else(|| JsonRpcError::new(-32602, "resource_id is required"))?;
+
+    let schema = client.get_resource_schema(resource_id).await.map_err(|e| {
+        error!("Failed to get schema for {}: {}", resource_id, e);
+        JsonRpcError::new(-32000, format!("Failed to get schema: {}", e))
+    })?;
+
+    Ok(json!({
+        "resource_id": resource_id,
+        "schema": schema.into_iter().map(|(n, t)| json!({"name": n, "type": t})).collect::<Vec<Value>>()
+    }))
+}
+
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -1309,11 +1350,15 @@ mod tests {
             &self,
             _resource_id: &str,
         ) -> Result<statcan_rs::DataHandler> {
-            Ok(statcan_rs::DataHandler::BlobDownload(
-                "http://mock".to_string(),
+            Ok(statcan_rs::DataHandler::DatastoreQuery(
+                "mock".to_string(),
+                None,
             ))
         }
         async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        async fn get_resource_schema(&self, _resource_id: &str) -> Result<Vec<(String, String)>> {
             Ok(vec![])
         }
     }
