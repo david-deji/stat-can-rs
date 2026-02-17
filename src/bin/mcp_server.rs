@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::post,
     Router,
@@ -150,37 +151,23 @@ struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    api_key: Option<String>,
 }
 
 async fn run_sse_server(
     port: u16,
-    _api_key: Option<String>,
+    api_key: Option<String>,
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
-    let state = AppState {
+    let state = Arc::new(AppState {
         client,
         open_data_client,
         sessions: Arc::new(RwLock::new(HashMap::new())),
-    };
+        api_key,
+    });
 
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers(tower_http::cors::Any)
-        .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
-
-    let app = Router::new()
-        .route(
-            "/sse",
-            post(handle_sse_post)
-                .get(handle_sse_get)
-                .delete(handle_sse_delete),
-        )
-        .route("/messages", post(handle_sse_post)) // Legacy alias?
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(Arc::new(state));
+    let app = create_router(state);
 
     // Bind to dual-stack
     let addr = format!("[::]:{}", port);
@@ -325,4 +312,135 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(expected_key) = &state.api_key {
+        let auth_header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok());
+
+        match auth_header {
+            Some(header_val) if header_val.starts_with("Bearer ") => {
+                let token = &header_val[7..];
+                if constant_time_eq::constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
+                    return Ok(next.run(req).await);
+                }
+            }
+            _ => {}
+        }
+        let mut response = StatusCode::UNAUTHORIZED.into_response();
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=\"mcp-server\""),
+        );
+        return Ok(response);
+    }
+    Ok(next.run(req).await)
+}
+
+fn create_router(state: Arc<AppState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
+
+    Router::new()
+        .route(
+            "/sse",
+            post(handle_sse_post)
+                .get(handle_sse_get)
+                .delete(handle_sse_delete),
+        )
+        .route("/messages", post(handle_sse_post)) // Legacy alias?
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(TraceLayer::new_for_http())
+        .layer(cors)
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+    use axum::http::Request;
+    use axum::body::Body;
+
+    #[tokio::test]
+    async fn test_auth_enforcement() {
+        let client = Arc::new(StatCanClient::new().unwrap());
+        let od_client = Arc::new(statcan_rs::GenericCKANDriver::new("http://example.com").unwrap());
+
+        // 1. With API Key configured
+        let state_with_auth = Arc::new(AppState {
+            client: client.clone(),
+            open_data_client: od_client.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            api_key: Some("secret123".to_string()),
+        });
+
+        let app_with_auth = create_router(state_with_auth.clone());
+
+        // Request without header -> Should be 401
+        let req_no_auth = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#))
+            .unwrap();
+
+        let response = app_with_auth.clone().oneshot(req_no_auth).await.unwrap();
+
+        // Assert 401
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "Request without auth should be rejected");
+
+        // 2. With Valid Auth Header
+        let req_valid_auth = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer secret123")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#))
+            .unwrap();
+
+        let response_ok = app_with_auth.clone().oneshot(req_valid_auth).await.unwrap();
+        assert_eq!(response_ok.status(), StatusCode::OK, "Request with valid auth should be accepted");
+
+        // 3. With Invalid Auth Header
+        let req_invalid_auth = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer wrong")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#))
+            .unwrap();
+
+        let response_bad = app_with_auth.clone().oneshot(req_invalid_auth).await.unwrap();
+        assert_eq!(response_bad.status(), StatusCode::UNAUTHORIZED, "Request with invalid auth should be rejected");
+
+        // 4. No API Key configured (Legacy mode)
+        let state_no_auth = Arc::new(AppState {
+            client: client.clone(),
+            open_data_client: od_client.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            api_key: None,
+        });
+
+        let app_no_auth = create_router(state_no_auth);
+        let req_legacy = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#))
+            .unwrap();
+
+        let response_legacy = app_no_auth.oneshot(req_legacy).await.unwrap();
+        assert_eq!(response_legacy.status(), StatusCode::OK, "Legacy request (no API key configured) should be accepted");
+    }
 }
