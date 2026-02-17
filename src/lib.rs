@@ -46,13 +46,23 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
-        for _ in 0..needed {
-            padded_string.push_str(".0");
-        }
+    // Optimization: avoid Vec allocation by counting dots.
+    // Logic: splitting by '.' yields (dots + 1) parts.
+    // e.g., "1.1" -> 1 dot -> 2 parts.
+    let dot_count = c.chars().filter(|&x| x == '.').count();
+    let parts_count = dot_count + 1;
+
+    if parts_count >= 10 {
+        return c.to_string();
+    }
+
+    let needed = 10 - parts_count;
+    // Optimization: pre-allocate String capacity to avoid reallocations.
+    // Each ".0" is 2 bytes.
+    let mut padded_string = String::with_capacity(c.len() + needed * 2);
+    padded_string.push_str(c);
+    for _ in 0..needed {
+        padded_string.push_str(".0");
     }
     padded_string
 }
