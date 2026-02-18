@@ -1,14 +1,16 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, State, Request},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::post,
     Router,
 };
 use clap::Parser;
+use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
@@ -150,19 +152,52 @@ struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    api_key: Option<String>,
+}
+
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected_key) = &state.api_key {
+        let auth_header = req.headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+
+        match auth_header {
+            Some(auth_str) if auth_str.starts_with("Bearer ") => {
+                let token = &auth_str[7..];
+                if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
+                    return next.run(req).await;
+                }
+            }
+            _ => {}
+        }
+
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("WWW-Authenticate", "Bearer realm=\"mcp-server\"")],
+            "Unauthorized",
+        )
+            .into_response();
+    }
+
+    next.run(req).await
 }
 
 async fn run_sse_server(
     port: u16,
-    _api_key: Option<String>,
+    api_key: Option<String>,
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
-    let state = AppState {
+    let state = Arc::new(AppState {
         client,
         open_data_client,
         sessions: Arc::new(RwLock::new(HashMap::new())),
-    };
+        api_key,
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
@@ -178,9 +213,10 @@ async fn run_sse_server(
                 .delete(handle_sse_delete),
         )
         .route("/messages", post(handle_sse_post)) // Legacy alias?
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(Arc::new(state));
+        .with_state(state);
 
     // Bind to dual-stack
     let addr = format!("[::]:{}", port);

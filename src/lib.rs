@@ -711,7 +711,7 @@ impl CKANClient for StatCanDriver {
         for (pid, title, _) in results {
             packages.push(PackageMetadata {
                 id: pid.clone(),
-                title: title,
+                title,
                 notes: None,
                 url: None,
                 resources: vec![],
