@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::post,
     Router,
@@ -150,27 +151,37 @@ struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    api_key: Option<String>,
 }
 
-async fn run_sse_server(
-    port: u16,
-    _api_key: Option<String>,
-    client: Arc<StatCanClient>,
-    open_data_client: Arc<statcan_rs::GenericCKANDriver>,
-) -> anyhow::Result<()> {
-    let state = AppState {
-        client,
-        open_data_client,
-        sessions: Arc::new(RwLock::new(HashMap::new())),
-    };
+async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    if let Some(ref key) = state.api_key {
+        let auth_header = req
+            .headers()
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "));
 
+        match auth_header {
+            Some(token) => {
+                if !constant_time_eq::constant_time_eq(token.as_bytes(), key.as_bytes()) {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+            None => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    }
+    next.run(req).await
+}
+
+fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(tower_http::cors::Any)
         .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
 
-    let app = Router::new()
+    Router::new()
         .route(
             "/sse",
             post(handle_sse_post)
@@ -178,9 +189,29 @@ async fn run_sse_server(
                 .delete(handle_sse_delete),
         )
         .route("/messages", post(handle_sse_post)) // Legacy alias?
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(Arc::new(state));
+        .with_state(state)
+}
+
+async fn run_sse_server(
+    port: u16,
+    api_key: Option<String>,
+    client: Arc<StatCanClient>,
+    open_data_client: Arc<statcan_rs::GenericCKANDriver>,
+) -> anyhow::Result<()> {
+    let state = Arc::new(AppState {
+        client,
+        open_data_client,
+        sessions: Arc::new(RwLock::new(HashMap::new())),
+        api_key,
+    });
+
+    let app = create_router(state);
 
     // Bind to dual-stack
     let addr = format!("[::]:{}", port);
@@ -325,4 +356,116 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // for oneshot
+
+    #[tokio::test]
+    async fn test_auth_enforcement() {
+        // Setup state with API key
+        let client = Arc::new(StatCanClient::new().unwrap());
+        let open_data_client =
+            Arc::new(statcan_rs::GenericCKANDriver::new("https://example.com").unwrap());
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let api_key = Some("test_secret_key".to_string());
+
+        let state = Arc::new(AppState {
+            client,
+            open_data_client,
+            sessions,
+            api_key: api_key.clone(),
+        });
+
+        let app = create_router(state);
+
+        // 1. Request without auth header -> 401
+        let req = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "Should reject missing header"
+        );
+
+        // 2. Request with wrong auth header -> 401
+        let req = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Authorization", "Bearer wrong_key")
+            .header("Content-Type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "Should reject wrong key"
+        );
+
+        // 3. Request with correct auth header -> Should be accepted
+        // Use a simple JSON to pass Json extraction, even if logic fails later
+        let valid_rpc = r#"{"jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1}"#;
+
+        let req = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Authorization", "Bearer test_secret_key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(valid_rpc))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "Should accept correct key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_auth_configured() {
+        // Setup state WITHOUT API key
+        let client = Arc::new(StatCanClient::new().unwrap());
+        let open_data_client =
+            Arc::new(statcan_rs::GenericCKANDriver::new("https://example.com").unwrap());
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let api_key = None;
+
+        let state = Arc::new(AppState {
+            client,
+            open_data_client,
+            sessions,
+            api_key,
+        });
+
+        let app = create_router(state);
+
+        // Request without auth header -> Should pass (not 401)
+        let valid_rpc = r#"{"jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1}"#;
+        let req = Request::builder()
+            .uri("/sse")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(valid_rpc))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "Should allow when no key configured"
+        );
+    }
 }
