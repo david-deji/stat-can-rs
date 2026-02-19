@@ -461,7 +461,7 @@ impl StatCanDriver {
         let payload: Vec<_> = vectors
             .iter()
             .map(|v| {
-                let v_clean = v.to_lowercase().replace("v", "");
+                let v_clean = v.trim_start_matches(|c| c == 'v' || c == 'V');
                 // Parse to int if possible, else generic string
                 let id_val = if let Ok(n) = v_clean.parse::<i64>() {
                     json!(n)
