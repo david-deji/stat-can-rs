@@ -112,6 +112,7 @@ async fn run_stdio_server(
             limiter.until_ready().await;
         }
 
+        eprintln!("DEBUG: Received line: {:?}", line); // Debugging input
         let req: Result<JsonRpcRequest, _> = serde_json::from_str(&line);
         match req {
             Ok(req) => {
@@ -150,11 +151,12 @@ struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    api_key: Option<String>,
 }
 
 async fn run_sse_server(
     port: u16,
-    _api_key: Option<String>,
+    api_key: Option<String>,
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
@@ -162,6 +164,7 @@ async fn run_sse_server(
         client,
         open_data_client,
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        api_key,
     };
 
     let cors = CorsLayer::new()
@@ -242,6 +245,27 @@ async fn handle_sse_post(
             "Missing or invalid Mcp-Session-Id header",
         )
             .into_response();
+    }
+
+    // Auth Check
+    if let Some(ref key) = state.api_key {
+        let auth_header = headers
+            .get("x-api-key")
+            .or_else(|| headers.get("authorization"))
+            .and_then(|h| h.to_str().ok());
+
+        let authorized = match auth_header {
+            Some(h) => h == key || h == format!("Bearer {}", key),
+            None => false,
+        };
+
+        if !authorized {
+            error!(
+                "Auth failed. Expected: {:?}, Received: {:?}",
+                key, auth_header
+            );
+            return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
+        }
     }
 
     let result = handle_request(

@@ -1,9 +1,13 @@
 use crate::{CKANClient, StatCanClientTrait, StatCanError};
+use encoding_rs::{UTF_16BE, UTF_16LE};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // --- Protocol Types ---
 
@@ -649,6 +653,12 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
             JsonRpcError::new(-32000, format!("Download failed: {}", e))
         })?;
 
+    // Transcode UTF-16 if needed (some StatCan Open Data files are UTF-16)
+    let temp_path = ensure_utf8_encoding(&temp_path).await.map_err(|e| {
+        error!("Encoding check failed: {}", e);
+        JsonRpcError::new(-32000, format!("Encoding check failed: {}", e))
+    })?;
+
     // 4. Parse with Polars, apply filters, take N rows
     let rows_limit = rows;
     let filters_owned: Option<Vec<(String, String)>> =
@@ -864,4 +874,67 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
         "ping" => Ok(json!({})),
         _ => Err(JsonRpcError::new(-32601, "Method not found")),
     }
+}
+
+/// Checks if a file is UTF-16 and converts it to UTF-8 if necessary.
+/// Returns the path to the UTF-8 file (either original or converted).
+async fn ensure_utf8_encoding(path: &Path) -> std::io::Result<PathBuf> {
+    // This can be slow/IO heavy, run blocking
+    let path_buf = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = File::open(&path_buf)?;
+        let metadata = file.metadata()?;
+        let len = metadata.len();
+
+        // Safety limit: if > 500MB, warn
+        if len > 500 * 1024 * 1024 {
+            warn!(
+                "File {:?} is large ({} MB), transcoding might be slow/OOM",
+                path_buf,
+                len / 1024 / 1024
+            );
+        }
+
+        let mut buffer = Vec::with_capacity(len as usize + 1);
+        file.read_to_end(&mut buffer)?;
+
+        // Check BOM
+        let encoding = if buffer.starts_with(b"\xFF\xFE") {
+            Some(UTF_16LE)
+        } else if buffer.starts_with(b"\xFE\xFF") {
+            Some(UTF_16BE)
+        } else {
+            // Heuristic: Check for high null ratio in first 4KB
+            let check_len = std::cmp::min(buffer.len(), 4096);
+            let slice = &buffer[..check_len];
+            let nulls = slice.iter().filter(|&&b| b == 0).count();
+            if nulls > check_len / 3 {
+                // Even/Odd check
+                let even_nulls = slice.iter().step_by(2).filter(|&&b| b == 0).count();
+                if even_nulls > check_len / 3 {
+                    Some(UTF_16BE)
+                } else {
+                    Some(UTF_16LE)
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(enc) = encoding {
+            info!("Transcoding {:?} from {} to UTF-8", path_buf, enc.name());
+            let (cow, _, malformed) = enc.decode(&buffer);
+            if malformed {
+                warn!("Encoding had malformed sequences");
+            }
+            let new_path = path_buf.with_extension("utf8.csv");
+            let mut out_file = File::create(&new_path)?;
+            out_file.write_all(cow.as_bytes())?;
+            Ok(new_path)
+        } else {
+            Ok(path_buf)
+        }
+    })
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
 }
