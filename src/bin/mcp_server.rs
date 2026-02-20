@@ -1,14 +1,17 @@
 use axum::{
-    extract::{Json, State},
+    body::Body,
+    extract::{Json, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::post,
     Router,
 };
 use clap::Parser;
+use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
@@ -140,6 +143,31 @@ async fn run_stdio_server(
 
 // --- SSE Mode ---
 
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(ref api_key) = state.api_key {
+        // Check Authorization header
+        let auth_header = headers
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "));
+
+        match auth_header {
+            Some(token) => {
+                if !constant_time_eq(token.as_bytes(), api_key.as_bytes()) {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+            None => return Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+    Ok(next.run(request).await)
+}
+
 #[allow(dead_code)]
 struct Session {
     id: String,
@@ -150,19 +178,21 @@ struct AppState {
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    api_key: Option<String>,
 }
 
 async fn run_sse_server(
     port: u16,
-    _api_key: Option<String>,
+    api_key: Option<String>,
     client: Arc<StatCanClient>,
     open_data_client: Arc<statcan_rs::GenericCKANDriver>,
 ) -> anyhow::Result<()> {
-    let state = AppState {
+    let state = Arc::new(AppState {
         client,
         open_data_client,
         sessions: Arc::new(RwLock::new(HashMap::new())),
-    };
+        api_key,
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
@@ -178,9 +208,10 @@ async fn run_sse_server(
                 .delete(handle_sse_delete),
         )
         .route("/messages", post(handle_sse_post)) // Legacy alias?
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(Arc::new(state));
+        .with_state(state);
 
     // Bind to dual-stack
     let addr = format!("[::]:{}", port);
