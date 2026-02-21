@@ -46,13 +46,18 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
-        for _ in 0..needed {
-            padded_string.push_str(".0");
-        }
+    // Optimization: Use iterator count to avoid allocating a Vec<String>
+    let parts_count = c.split('.').count();
+
+    if parts_count >= 10 {
+        return c.to_string();
+    }
+
+    let needed = 10 - parts_count;
+    let mut padded_string = String::with_capacity(c.len() + needed * 2);
+    padded_string.push_str(c);
+    for _ in 0..needed {
+        padded_string.push_str(".0");
     }
     padded_string
 }
@@ -461,7 +466,8 @@ impl StatCanDriver {
         let payload: Vec<_> = vectors
             .iter()
             .map(|v| {
-                let v_clean = v.to_lowercase().replace("v", "");
+                // Optimization: Use trim_start_matches to avoid string allocation (vs replace/to_lowercase)
+                let v_clean = v.trim_start_matches(|c| c == 'v' || c == 'V');
                 // Parse to int if possible, else generic string
                 let id_val = if let Ok(n) = v_clean.parse::<i64>() {
                     json!(n)
