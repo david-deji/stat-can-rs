@@ -13,6 +13,7 @@ use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
 use statcan_rs::StatCanClient;
+use constant_time_eq::constant_time_eq;
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -202,6 +203,25 @@ async fn run_sse_server(
     Ok(())
 }
 
+fn check_auth(expected_key: &str, auth_header: Option<&str>) -> bool {
+    let header_val = match auth_header {
+        Some(h) => h,
+        None => return false,
+    };
+
+    if constant_time_eq(header_val.as_bytes(), expected_key.as_bytes()) {
+        return true;
+    }
+
+    if let Some(token) = header_val.strip_prefix("Bearer ") {
+        if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
+            return true;
+        }
+    }
+
+    false
+}
+
 async fn handle_sse_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -254,16 +274,8 @@ async fn handle_sse_post(
             .or_else(|| headers.get("authorization"))
             .and_then(|h| h.to_str().ok());
 
-        let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
-            None => false,
-        };
-
-        if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+        if !check_auth(key, auth_header) {
+            error!("Auth failed. Invalid API Key provided.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
@@ -349,4 +361,38 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_auth() {
+        let key = "sk_live_123456";
+
+        // Correct key
+        assert!(check_auth(key, Some(key)));
+
+        // Correct key with Bearer
+        assert!(check_auth(key, Some(&format!("Bearer {}", key))));
+
+        // Wrong key
+        assert!(!check_auth(key, Some("wrong_key")));
+
+        // Wrong key with Bearer
+        assert!(!check_auth(key, Some("Bearer wrong_key")));
+
+        // Partial match
+        assert!(!check_auth(key, Some("sk_live_123")));
+
+        // Prefix only
+        assert!(!check_auth(key, Some("Bearer ")));
+
+        // None
+        assert!(!check_auth(key, None));
+
+        // Different length
+        assert!(!check_auth(key, Some("sk_live_1234567")));
+    }
 }
