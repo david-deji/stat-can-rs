@@ -254,16 +254,8 @@ async fn handle_sse_post(
             .or_else(|| headers.get("authorization"))
             .and_then(|h| h.to_str().ok());
 
-        let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
-            None => false,
-        };
-
-        if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+        if !statcan_rs::security::validate_api_key(key, auth_header) {
+            error!("Authentication failed: invalid or missing API key");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }

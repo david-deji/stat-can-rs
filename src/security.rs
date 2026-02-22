@@ -1,6 +1,24 @@
 use rand::{Rng, CryptoRng};
 use sha2::{Sha256, Digest};
 use hex;
+use constant_time_eq::constant_time_eq;
+
+/// Validates an API key against a provided header value.
+/// Supports "Bearer <token>" or direct token format.
+/// Uses constant-time comparison to prevent timing attacks.
+pub fn validate_api_key(expected_key: &str, received_header: Option<&str>) -> bool {
+    if let Some(mut header_val) = received_header {
+        // Strip "Bearer " prefix if present
+        if header_val.starts_with("Bearer ") {
+            header_val = &header_val[7..];
+        }
+
+        // Use constant time comparison
+        constant_time_eq(expected_key.as_bytes(), header_val.as_bytes())
+    } else {
+        false
+    }
+}
 
 /// Generates a new API key and its hash.
 /// Returns (api_key, key_hash)
@@ -39,5 +57,31 @@ mod tests {
         hasher.update(key.as_bytes());
         let expected_hash = hex::encode(hasher.finalize());
         assert_eq!(hash, expected_hash);
+    }
+
+    #[test]
+    fn test_validate_api_key() {
+        let key = "sk_live_123456";
+
+        // Correct key
+        assert!(validate_api_key(key, Some("sk_live_123456")));
+
+        // Correct key with Bearer
+        assert!(validate_api_key(key, Some("Bearer sk_live_123456")));
+
+        // Incorrect key
+        assert!(!validate_api_key(key, Some("sk_live_654321")));
+
+        // Partial key (length mismatch)
+        assert!(!validate_api_key(key, Some("sk_live_123")));
+
+        // Longer key
+        assert!(!validate_api_key(key, Some("sk_live_1234567")));
+
+        // No header
+        assert!(!validate_api_key(key, None));
+
+        // Empty header
+        assert!(!validate_api_key(key, Some("")));
     }
 }
