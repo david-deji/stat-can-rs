@@ -9,6 +9,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
@@ -202,6 +203,16 @@ async fn run_sse_server(
     Ok(())
 }
 
+fn check_auth(expected_key: &str, auth_header: Option<&str>) -> bool {
+    match auth_header {
+        Some(h) => {
+            let provided_key = if h.starts_with("Bearer ") { &h[7..] } else { h };
+            constant_time_eq(provided_key.as_bytes(), expected_key.as_bytes())
+        }
+        None => false,
+    }
+}
+
 async fn handle_sse_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -254,16 +265,8 @@ async fn handle_sse_post(
             .or_else(|| headers.get("authorization"))
             .and_then(|h| h.to_str().ok());
 
-        let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
-            None => false,
-        };
-
-        if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+        if !check_auth(key, auth_header) {
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
@@ -349,4 +352,38 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_auth() {
+        let key = "secret_key";
+
+        // Exact match
+        assert!(check_auth(key, Some(key)));
+
+        // Bearer match
+        assert!(check_auth(key, Some("Bearer secret_key")));
+
+        // Incorrect key
+        assert!(!check_auth(key, Some("wrong_key")));
+
+        // Incorrect Bearer
+        assert!(!check_auth(key, Some("Bearer wrong_key")));
+
+        // Missing header
+        assert!(!check_auth(key, None));
+
+        // Empty header
+        assert!(!check_auth(key, Some("")));
+
+        // Partial match (prefix)
+        assert!(!check_auth("secret", Some("sec")));
+
+        // Partial match (superstring)
+        assert!(!check_auth("secret", Some("secret_extra")));
+    }
 }
