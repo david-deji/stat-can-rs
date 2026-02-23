@@ -46,13 +46,18 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
-        for _ in 0..needed {
-            padded_string.push_str(".0");
-        }
+    let parts_len = c.split('.').count();
+    if parts_len >= 10 {
+        return c.to_string();
+    }
+
+    let needed = 10 - parts_len;
+    // Pre-calculate capacity: original string + 2 bytes per ".0"
+    let mut padded_string = String::with_capacity(c.len() + needed * 2);
+    padded_string.push_str(c);
+
+    for _ in 0..needed {
+        padded_string.push_str(".0");
     }
     padded_string
 }
@@ -1360,4 +1365,5 @@ mod tests {
         let res_ok = client.get_cache_path("12345678").await;
         assert!(res_ok.is_ok());
     }
+
 }
