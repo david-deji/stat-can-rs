@@ -13,6 +13,7 @@ use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
 use statcan_rs::StatCanClient;
+use constant_time_eq::constant_time_eq;
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -202,6 +203,28 @@ async fn run_sse_server(
     Ok(())
 }
 
+fn check_auth(expected_key: &str, headers: &HeaderMap) -> bool {
+    let auth_header = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("authorization"))
+        .and_then(|h| h.to_str().ok());
+
+    match auth_header {
+        Some(h) => {
+            if constant_time_eq(h.as_bytes(), expected_key.as_bytes()) {
+                return true;
+            }
+            if let Some(token) = h.strip_prefix("Bearer ") {
+                if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
+                    return true;
+                }
+            }
+            false
+        }
+        None => false,
+    }
+}
+
 async fn handle_sse_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -249,21 +272,8 @@ async fn handle_sse_post(
 
     // Auth Check
     if let Some(ref key) = state.api_key {
-        let auth_header = headers
-            .get("x-api-key")
-            .or_else(|| headers.get("authorization"))
-            .and_then(|h| h.to_str().ok());
-
-        let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
-            None => false,
-        };
-
-        if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+        if !check_auth(key, &headers) {
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
@@ -349,4 +359,46 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn test_check_auth() {
+        let key = "secret_key";
+        let mut headers = HeaderMap::new();
+
+        // Case 1: No headers
+        assert!(!check_auth(key, &headers));
+
+        // Case 2: x-api-key correct
+        headers.insert("x-api-key", HeaderValue::from_static("secret_key"));
+        assert!(check_auth(key, &headers));
+
+        // Case 3: x-api-key incorrect
+        headers.insert("x-api-key", HeaderValue::from_static("wrong_key"));
+        assert!(!check_auth(key, &headers));
+
+        // Case 4: Authorization Bearer correct
+        headers.remove("x-api-key");
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer secret_key"),
+        );
+        assert!(check_auth(key, &headers));
+
+        // Case 5: Authorization Bearer incorrect
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer wrong_key"),
+        );
+        assert!(!check_auth(key, &headers));
+
+        // Case 6: Authorization malformed
+        headers.insert("authorization", HeaderValue::from_static("Basic secret_key"));
+        assert!(!check_auth(key, &headers));
+    }
 }
