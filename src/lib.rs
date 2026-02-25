@@ -45,15 +45,25 @@ pub enum StatCanError {
 pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
+    // Pre-computed zeros string for fast slicing.
+    // Max needed is 9 ".0"s (since split count is at least 1), but we keep 10 just in case.
+    const ZEROS: &str = ".0.0.0.0.0.0.0.0.0.0";
+
     let c = coord.trim();
-    let parts: Vec<&str> = c.split('.').collect();
-    let mut padded_string = c.to_string();
-    if parts.len() < 10 {
-        let needed = 10 - parts.len();
-        for _ in 0..needed {
-            padded_string.push_str(".0");
-        }
+    // Optimization: count parts without allocating a Vec
+    let parts_count = c.split('.').count();
+
+    if parts_count >= 10 {
+        return c.to_string();
     }
+
+    let needed = 10 - parts_count;
+    // Optimization: pre-allocate capacity to avoid reallocations
+    let mut padded_string = String::with_capacity(c.len() + needed * 2);
+    padded_string.push_str(c);
+    // Optimization: append slice directly instead of loop
+    padded_string.push_str(&ZEROS[..needed * 2]);
+
     padded_string
 }
 
