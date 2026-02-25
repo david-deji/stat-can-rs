@@ -26,6 +26,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use uuid::Uuid;
+use constant_time_eq::constant_time_eq;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -254,16 +255,8 @@ async fn handle_sse_post(
             .or_else(|| headers.get("authorization"))
             .and_then(|h| h.to_str().ok());
 
-        let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
-            None => false,
-        };
-
-        if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+        if !check_auth(key, auth_header) {
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
@@ -349,4 +342,69 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+fn check_auth(expected_key: &str, received_header: Option<&str>) -> bool {
+    match received_header {
+        Some(h) => {
+            if constant_time_eq(h.as_bytes(), expected_key.as_bytes()) {
+                return true;
+            }
+            if h.starts_with("Bearer ") {
+                let token = &h[7..];
+                return constant_time_eq(token.as_bytes(), expected_key.as_bytes());
+            }
+            false
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_auth_valid_key() {
+        let key = "sk_live_1234567890abcdef";
+        assert!(check_auth(key, Some(key)));
+    }
+
+    #[test]
+    fn test_check_auth_valid_bearer() {
+        let key = "sk_live_1234567890abcdef";
+        let header = format!("Bearer {}", key);
+        assert!(check_auth(key, Some(&header)));
+    }
+
+    #[test]
+    fn test_check_auth_invalid_key() {
+        let key = "sk_live_1234567890abcdef";
+        assert!(!check_auth(key, Some("wrong_key")));
+    }
+
+    #[test]
+    fn test_check_auth_invalid_bearer() {
+        let key = "sk_live_1234567890abcdef";
+        assert!(!check_auth(key, Some("Bearer wrong_key")));
+    }
+
+    #[test]
+    fn test_check_auth_missing_header() {
+        let key = "sk_live_1234567890abcdef";
+        assert!(!check_auth(key, None));
+    }
+
+    #[test]
+    fn test_check_auth_empty_header() {
+        let key = "sk_live_1234567890abcdef";
+        assert!(!check_auth(key, Some("")));
+    }
+
+    #[test]
+    fn test_check_auth_partial_match() {
+        let key = "sk_live_1234567890abcdef";
+        // Check prefix match doesn't work (though length check in constant_time_eq handles this implicitly)
+        assert!(!check_auth(key, Some("sk_live_1234567890abcde")));
+    }
 }
