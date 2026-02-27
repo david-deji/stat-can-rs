@@ -57,6 +57,15 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
     padded_string
 }
 
+/// Validates that an ID string contains only alphanumeric characters, hyphens, or underscores,
+/// and is not empty. This prevents path traversal attacks.
+pub fn is_valid_id_format(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
 pub trait StatCanClientTrait: CKANClient + Send + Sync {
     fn get_all_cubes_list_lite(&self) -> impl Future<Output = Result<CubeListResponse>> + Send;
     fn get_cube_metadata(
@@ -213,10 +222,7 @@ impl StatCanDriver {
         if pid.is_empty() {
             return Err(StatCanError::Api("PID cannot be empty".to_string()));
         }
-        if !pid
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
+        if !is_valid_id_format(pid) {
             return Err(StatCanError::Api("Invalid PID format".to_string()));
         }
         Ok(())
@@ -1035,6 +1041,11 @@ pub async fn download_and_extract_file(
     url: &str,
     pid: &str,
 ) -> Result<std::path::PathBuf> {
+    // Add validation here!
+    if !is_valid_id_format(pid) {
+        return Err(StatCanError::Api("Invalid PID format".to_string()));
+    }
+
     if let Ok(home) = std::env::var("HOME") {
         let cache_dir = std::path::PathBuf::from(home).join(".cache/statcan-rs/resources");
         let cached_path = cache_dir.join(format!("{}.csv", pid));
