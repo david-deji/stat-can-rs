@@ -247,14 +247,11 @@ impl StatCanDataFrame {
             return Ok(self);
         }
 
-        // 3. Filter to only rows matching those dates using OR chain
-        //    (avoids needing the `is_in` feature flag)
-        let mut filter_expr = col("REF_DATE").eq(lit(top_dates_str[0].clone()));
-        for date in top_dates_str.iter().skip(1) {
-            filter_expr = filter_expr.or(col("REF_DATE").eq(lit(date.clone())));
-        }
-
-        let df = self.0.lazy().filter(filter_expr).collect()?;
+        // 3. Filter to only rows matching those dates using `is_in`.
+        //    ⚡ Bolt optimization: Replaced inefficient `.or()` chaining with a single `.is_in()` call
+        //    for O(1) AST creation and faster evaluation by the Polars execution engine.
+        let series = Series::new("dates", &top_dates_str);
+        let df = self.0.lazy().filter(col("REF_DATE").is_in(lit(series))).collect()?;
 
         Ok(Self(df))
     }
@@ -454,12 +451,10 @@ impl StatCanLazyFrame {
             return Ok(self);
         }
 
-        let mut filter_expr = col("REF_DATE").eq(lit(top_dates_str[0].clone()));
-        for date in top_dates_str.iter().skip(1) {
-            filter_expr = filter_expr.or(col("REF_DATE").eq(lit(date.clone())));
-        }
-
-        let lf = self.0.filter(filter_expr);
+        // ⚡ Bolt optimization: Replaced inefficient `.or()` chaining with a single `.is_in()` call
+        // for O(1) AST creation and faster evaluation by the Polars execution engine.
+        let series = Series::new("dates", &top_dates_str);
+        let lf = self.0.filter(col("REF_DATE").is_in(lit(series)));
         Ok(Self(lf))
     }
 }
