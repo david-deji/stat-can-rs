@@ -255,15 +255,26 @@ async fn handle_sse_post(
             .and_then(|h| h.to_str().ok());
 
         let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
+            Some(h) => {
+                let h_clean = if h.starts_with("Bearer ") {
+                    &h[7..]
+                } else {
+                    h
+                };
+                // Security: Use constant-time comparison to prevent timing attacks.
+                // Length check is required before calling `constant_time_eq` to prevent panics.
+                if h_clean.len() == key.len() {
+                    constant_time_eq::constant_time_eq(h_clean.as_bytes(), key.as_bytes())
+                } else {
+                    false
+                }
+            }
             None => false,
         };
 
         if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+            // Security: Do not log the expected or received API keys to prevent sensitive data exposure.
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
