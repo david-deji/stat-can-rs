@@ -247,12 +247,10 @@ impl StatCanDataFrame {
             return Ok(self);
         }
 
-        // 3. Filter to only rows matching those dates using OR chain
-        //    (avoids needing the `is_in` feature flag)
-        let mut filter_expr = col("REF_DATE").eq(lit(top_dates_str[0].clone()));
-        for date in top_dates_str.iter().skip(1) {
-            filter_expr = filter_expr.or(col("REF_DATE").eq(lit(date.clone())));
-        }
+        // 3. Filter to only rows matching those dates using `.is_in()`
+        //    (much faster than chaining `.or()`)
+        let s = Series::new("dates", &top_dates_str);
+        let filter_expr = col("REF_DATE").is_in(lit(s));
 
         let df = self.0.lazy().filter(filter_expr).collect()?;
 
@@ -454,10 +452,8 @@ impl StatCanLazyFrame {
             return Ok(self);
         }
 
-        let mut filter_expr = col("REF_DATE").eq(lit(top_dates_str[0].clone()));
-        for date in top_dates_str.iter().skip(1) {
-            filter_expr = filter_expr.or(col("REF_DATE").eq(lit(date.clone())));
-        }
+        let s = Series::new("dates", &top_dates_str);
+        let filter_expr = col("REF_DATE").is_in(lit(s));
 
         let lf = self.0.filter(filter_expr);
         Ok(Self(lf))
