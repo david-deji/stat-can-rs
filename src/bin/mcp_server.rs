@@ -255,15 +255,20 @@ async fn handle_sse_post(
             .and_then(|h| h.to_str().ok());
 
         let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
+            Some(h) => {
+                let h_bytes = h.as_bytes();
+                let key_bytes = key.as_bytes();
+                let bearer_key = format!("Bearer {}", key);
+                let bearer_key_bytes = bearer_key.as_bytes();
+
+                (h_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(h_bytes, key_bytes)) ||
+                (h_bytes.len() == bearer_key_bytes.len() && constant_time_eq::constant_time_eq(h_bytes, bearer_key_bytes))
+            },
             None => false,
         };
 
         if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
