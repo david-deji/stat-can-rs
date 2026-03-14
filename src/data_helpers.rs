@@ -214,6 +214,40 @@ pub async fn fetch_resource_as_df<C: CKANClient>(
 mod tests {
     use super::*;
     use crate::ResourceMetadata;
+    use crate::PackageMetadata;
+    use crate::DataHandler;
+    use async_trait::async_trait;
+    use crate::CKANClient;
+
+    struct MockNoUrlClient;
+
+    #[async_trait]
+    impl CKANClient for MockNoUrlClient {
+        async fn ping(&self) -> crate::Result<String> {
+            Ok("pong".to_string())
+        }
+        async fn search_packages(&self, _query: &str, _limit: usize) -> crate::Result<Vec<PackageMetadata>> {
+            Ok(vec![])
+        }
+        async fn get_package_metadata(&self, id: &str) -> crate::Result<PackageMetadata> {
+            Ok(PackageMetadata {
+                id: id.to_string(),
+                title: "Test Package".to_string(),
+                notes: None,
+                url: None,
+                resources: vec![],
+            })
+        }
+        async fn get_resource_handler(&self, resource_id: &str) -> crate::Result<DataHandler> {
+            Ok(DataHandler::DatastoreQuery(resource_id.to_string(), None))
+        }
+        async fn query_datastore(&self, _sql: &str) -> crate::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        async fn get_resource_schema(&self, _resource_id: &str) -> crate::Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+    }
 
     #[test]
     fn test_select_best_resource_empty() {
@@ -312,5 +346,12 @@ mod tests {
         let fuzzy_score = score_cube_title_match("Labour force characteristics by province", "Labor forc");
         assert!(fuzzy_score > 0.0);
         assert!(fuzzy_score < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_resource_as_df_no_url() {
+        let client = std::sync::Arc::new(MockNoUrlClient);
+        let result = fetch_resource_as_df(client, "test-id").await;
+        assert_eq!(result.unwrap_err(), "Resource has no download URL available");
     }
 }
