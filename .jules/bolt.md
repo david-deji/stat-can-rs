@@ -1,0 +1,5 @@
+## 2025-02-09 - Optimize redundant string allocations in dimension filtering
+
+**Learning:** When using `.to_lowercase()` to perform case-insensitive checks inside an iterator, it allocates a new String on every check. The `find_cubes_by_dimension` function originally checked for matches via `.any()` and then explicitly filtered and extracted the matches via `.filter().map().collect()`. This resulted in `to_lowercase()` executing *twice* for every matching element, generating unnecessary duplicate heap allocations and extra CPU overhead during traversal.
+
+**Action:** Refactored the two-pass algorithm into a single `.filter().map().collect()` pass to gather matches, and then checked if the collection `!is_empty()` before yielding the record. This eliminates the duplicate allocations and double-iteration without modifying the public API or changing behavior. Always look out for `.any()` or `.find()` loops that are immediately followed by an extraction loop that repeats the same condition.

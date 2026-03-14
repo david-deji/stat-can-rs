@@ -373,25 +373,19 @@ impl StatCanDriver {
 
                 if meta_resp.status == "SUCCESS" {
                     if let Some(obj) = meta_resp.object {
-                        // Check if any dimension matches query strictly
-                        let has_dim = obj
+                        // Extract specifically matching dimension name(s)
+                        let matching_dims: Vec<_> = obj
                             .dimension
                             .iter()
-                            .any(|d| d.dimension_name_en.to_lowercase().contains(&query_lower));
+                            .filter(|d| d.dimension_name_en.to_lowercase().contains(&query_lower))
+                            .map(|d| d.dimension_name_en.clone())
+                            .collect();
 
-                        if has_dim {
+                        if !matching_dims.is_empty() {
                             results.push((
                                 obj.product_id.clone(),
                                 obj.cube_title_en.clone(),
-                                // Return the specifically matching dimension name(s) joined?
-                                obj.dimension
-                                    .iter()
-                                    .filter(|d| {
-                                        d.dimension_name_en.to_lowercase().contains(&query_lower)
-                                    })
-                                    .map(|d| d.dimension_name_en.clone())
-                                    .collect::<Vec<_>>()
-                                    .join(", "),
+                                matching_dims.join(", "),
                             ));
                         }
                     }
