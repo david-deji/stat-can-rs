@@ -1,8 +1,6 @@
 import subprocess
 import json
 import sys
-import time
-import os
 
 MCP_SERVER_BIN = "./target/release/mcp_server"
 

@@ -401,7 +401,7 @@ pub async fn handle_fetch_data_by_vector<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
+    } else if resp.object.as_ref().map_or(true, |v| v.is_empty()) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
         )
@@ -440,7 +440,7 @@ pub async fn handle_fetch_data_by_coords<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.is_none() || resp.object.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
+    } else if resp.object.as_ref().map_or(true, |v| v.is_empty()) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
         )
@@ -1027,16 +1027,27 @@ mod tests {
 
         let value = result.unwrap();
 
-        let tools_array = value.get("tools").expect("Response should contain a 'tools' key");
+        let tools_array = value
+            .get("tools")
+            .expect("Response should contain a 'tools' key");
         assert!(tools_array.is_array(), "'tools' should be an array");
 
         let tools = tools_array.as_array().unwrap();
         assert!(!tools.is_empty(), "The tools array should not be empty");
 
         for tool in tools {
-            assert!(tool.get("name").is_some(), "Each tool must have a 'name' property");
-            assert!(tool.get("description").is_some(), "Each tool must have a 'description' property");
-            assert!(tool.get("inputSchema").is_some(), "Each tool must have an 'inputSchema' property");
+            assert!(
+                tool.get("name").is_some(),
+                "Each tool must have a 'name' property"
+            );
+            assert!(
+                tool.get("description").is_some(),
+                "Each tool must have a 'description' property"
+            );
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "Each tool must have an 'inputSchema' property"
+            );
 
             let name = tool.get("name").unwrap();
             let description = tool.get("description").unwrap();
