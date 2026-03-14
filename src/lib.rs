@@ -604,6 +604,7 @@ impl StatCanDriver {
         let mut path = std::env::temp_dir();
         path.push("statcan");
         tokio::fs::create_dir_all(&path).await.unwrap_or(()); // Ensure dir exists
+        let _ = enforce_cache_limit(&path, 50).await;
         path.push(format!("{}.csv", pid));
         Ok(path)
     }
@@ -721,7 +722,9 @@ impl CKANClient for StatCanDriver {
         }
 
         // If no results and query looks like PID, try fetching metadata directly
-        if packages.is_empty() && regex::Regex::new(r"^\d+$").unwrap().is_match(query) {
+        static PID_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = PID_REGEX.get_or_init(|| regex::Regex::new(r"^\d+$").unwrap());
+        if packages.is_empty() && re.is_match(query) {
             if let Ok(meta) = self.get_cube_metadata(query).await {
                 if let Some(obj) = meta.object {
                     packages.push(PackageMetadata {
@@ -1035,6 +1038,32 @@ impl CKANClient for GenericCKANDriver {
     }
 }
 
+async fn enforce_cache_limit(cache_dir: &std::path::Path, max_files: usize) -> Result<()> {
+    if !tokio::fs::try_exists(cache_dir).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(cache_dir).await?;
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        if let Ok(metadata) = entry.metadata().await {
+            if metadata.is_file() {
+                if let Ok(modified) = metadata.modified() {
+                    files.push((entry.path(), modified));
+                }
+            }
+        }
+    }
+
+    if files.len() > max_files {
+        files.sort_by_key(|&(_, modified)| modified); // Oldest first
+        let to_remove = files.len() - max_files;
+        for (path, _) in files.into_iter().take(to_remove) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+    Ok(())
+}
+
 pub async fn download_and_extract_file(
     client: &Client,
     url: &str,
@@ -1046,11 +1075,13 @@ pub async fn download_and_extract_file(
         if tokio::fs::try_exists(&cached_path).await.unwrap_or(false) {
             return Ok(cached_path);
         }
+        let _ = enforce_cache_limit(&cache_dir, 50).await;
     }
 
     let mut path = std::env::temp_dir();
     path.push("statcan");
     tokio::fs::create_dir_all(&path).await.unwrap_or(());
+    let _ = enforce_cache_limit(&path, 50).await;
     let csv_path = path.join(format!("{}.csv", pid));
 
     if tokio::fs::try_exists(&csv_path).await.unwrap_or(false) {
