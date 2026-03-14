@@ -807,16 +807,28 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
 
     // 4. Parse with Polars, apply filters, take N rows
     let rows_limit = rows;
+    let col_names = df.get_column_names();
+
     let filters_owned: Option<Vec<(String, String)>> =
         args.get("filters").and_then(|v| v.as_object()).map(|obj| {
             obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .filter_map(|(k, v)| {
+                    v.as_str().and_then(|s| {
+                        col_names.iter().find(|&&c| c.eq_ignore_ascii_case(k)).map(|&c| {
+                            (c.to_string(), s.to_string())
+                        })
+                    })
+                })
                 .collect()
         });
 
     let columns_owned: Option<Vec<String>> = args["columns"].as_array().map(|arr| {
         arr.iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter_map(|v| {
+                v.as_str().and_then(|s| {
+                    col_names.iter().find(|&&c| c.eq_ignore_ascii_case(s)).map(|&c| c.to_string())
+                })
+            })
             .collect()
     });
 
@@ -829,33 +841,25 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
             // Apply filters if provided
             if let Some(ref filter_pairs) = filters_owned {
                 for (col_name, col_val) in filter_pairs {
-                    let col_lower = col_name.to_lowercase();
                     let val_lower = col_val.to_lowercase();
-                    let actual_col = result
-                        .get_column_names()
-                        .iter()
-                        .find(|c| c.to_lowercase() == col_lower)
-                        .map(|c| c.to_string());
 
-                    if let Some(col) = actual_col {
-                        let series = result
-                            .column(&col)
-                            .map_err(|e| format!("Column error: {}", e))?;
-                        let str_series = series
-                            .cast(&polars::prelude::DataType::String)
-                            .map_err(|e| format!("Cast error: {}", e))?;
-                        let ca = str_series.str().map_err(|e| format!("Str error: {}", e))?;
+                    let series = result
+                        .column(col_name)
+                        .map_err(|e| format!("Column error: {}", e))?;
+                    let str_series = series
+                        .cast(&polars::prelude::DataType::String)
+                        .map_err(|e| format!("Cast error: {}", e))?;
+                    let ca = str_series.str().map_err(|e| format!("Str error: {}", e))?;
 
-                        let mask = ca
-                            .into_iter()
-                            .map(|opt_val| {
-                                opt_val.is_some_and(|v| v.to_lowercase().contains(&val_lower))
-                            })
-                            .collect::<polars::prelude::BooleanChunked>();
-                        result = result
-                            .filter(&mask)
-                            .map_err(|e| format!("Filter error: {}", e))?;
-                    }
+                    let mask = ca
+                        .into_iter()
+                        .map(|opt_val| {
+                            opt_val.is_some_and(|v| v.to_lowercase().contains(&val_lower))
+                        })
+                        .collect::<polars::prelude::BooleanChunked>();
+                    result = result
+                        .filter(&mask)
+                        .map_err(|e| format!("Filter error: {}", e))?;
                 }
             }
 
