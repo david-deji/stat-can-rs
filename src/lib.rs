@@ -19,6 +19,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::future::Future;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -644,7 +645,16 @@ impl StatCanDriver {
             // We'll just take the first file.
             let mut csv_file = archive.by_index(0)?;
             let mut out_file = std::fs::File::create(&csv_path_clone)?;
-            std::io::copy(&mut csv_file, &mut out_file)?;
+            let limit: u64 = 10 * 1024 * 1024 * 1024; // 10GB limit
+            let mut take = (&mut csv_file).take(limit);
+            std::io::copy(&mut take, &mut out_file)?;
+            let mut tmp = [0; 1];
+            if csv_file.read(&mut tmp).unwrap_or(0) > 0 {
+                return Err(StatCanError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Zip extraction exceeded size limit (potential zip bomb)",
+                )));
+            }
             Ok(())
         })
         .await
@@ -1126,7 +1136,17 @@ pub async fn download_and_extract_file(
             // We'll just take the first file.
             let mut csv_file = archive.by_index(0)?;
             let mut out_file = std::fs::File::create(&csv_path_clone)?;
-            std::io::copy(&mut csv_file, &mut out_file)?;
+
+            let limit: u64 = 10 * 1024 * 1024 * 1024; // 10GB limit
+            let mut take = (&mut csv_file).take(limit);
+            std::io::copy(&mut take, &mut out_file)?;
+            let mut tmp = [0; 1];
+            if csv_file.read(&mut tmp).unwrap_or(0) > 0 {
+                return Err(StatCanError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Zip extraction exceeded size limit (potential zip bomb)",
+                )));
+            }
             Ok(())
         })
         .await
