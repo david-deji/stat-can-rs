@@ -642,9 +642,20 @@ impl StatCanDriver {
             let mut archive = ZipArchive::new(file)?;
             // Usually the CSV file inside has the same name as the PID or similar.
             // We'll just take the first file.
-            let mut csv_file = archive.by_index(0)?;
+            let csv_file = archive.by_index(0)?;
+
+            // Prevent ZIP bombs by limiting the extracted file size
+            const MAX_CSV_SIZE: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+            if csv_file.size() > MAX_CSV_SIZE {
+                return Err(StatCanError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Extracted file exceeds maximum allowed size",
+                )));
+            }
+
             let mut out_file = std::fs::File::create(&csv_path_clone)?;
-            std::io::copy(&mut csv_file, &mut out_file)?;
+            let mut limited_csv = std::io::Read::take(csv_file, MAX_CSV_SIZE);
+            std::io::copy(&mut limited_csv, &mut out_file)?;
             Ok(())
         })
         .await
@@ -1124,9 +1135,20 @@ pub async fn download_and_extract_file(
             let mut archive = ZipArchive::new(file)?;
             // Usually the CSV file inside has the same name as the PID or similar.
             // We'll just take the first file.
-            let mut csv_file = archive.by_index(0)?;
+            let csv_file = archive.by_index(0)?;
+
+            // Prevent ZIP bombs by limiting the extracted file size
+            const MAX_CSV_SIZE: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+            if csv_file.size() > MAX_CSV_SIZE {
+                return Err(StatCanError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Extracted file exceeds maximum allowed size",
+                )));
+            }
+
             let mut out_file = std::fs::File::create(&csv_path_clone)?;
-            std::io::copy(&mut csv_file, &mut out_file)?;
+            let mut limited_csv = std::io::Read::take(csv_file, MAX_CSV_SIZE);
+            std::io::copy(&mut limited_csv, &mut out_file)?;
             Ok(())
         })
         .await
