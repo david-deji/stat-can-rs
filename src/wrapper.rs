@@ -85,7 +85,7 @@ impl StatCanDataFrame {
                         DataType::Date,
                         StrptimeOptions {
                             format: Some("%Y-%m-%d".into()),
-                            strict: false,
+                            strict: true,
                             exact: false,
                             ..Default::default()
                         },
@@ -340,7 +340,7 @@ impl StatCanLazyFrame {
                         DataType::Date,
                         StrptimeOptions {
                             format: Some("%Y-%m-%d".into()),
-                            strict: false,
+                            strict: true,
                             exact: false,
                             ..Default::default()
                         },
@@ -809,5 +809,47 @@ mod tests {
         assert!(wrapper.inspect_column("GEO").is_ok());
         assert!(wrapper.inspect_column("geo").is_ok()); // Fuzzy match
         assert!(wrapper.inspect_column("NonExistent").is_err());
+    }
+
+    #[test]
+    fn test_filter_date_range_error_handling() {
+        // 1. Invalid date strings in StatCanDataFrame
+        let df = df!(
+            "REF_DATE" => &["not-a-date"],
+            "VALUE" => &[100.0]
+        )
+        .unwrap();
+        let wrapper = StatCanDataFrame::new(df);
+        let result = wrapper.filter_date_range(2020, 2022);
+        assert!(
+            result.is_err(),
+            "Expected error for invalid date format in StatCanDataFrame"
+        );
+
+        // 2. Invalid date strings in StatCanLazyFrame
+        let df = df!(
+            "REF_DATE" => &["not-a-date"],
+            "VALUE" => &[100.0]
+        )
+        .unwrap();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        let result = wrapper.filter_date_range(2020, 2022).unwrap().collect();
+        assert!(
+            result.is_err(),
+            "Expected error for invalid date format in StatCanLazyFrame during collect"
+        );
+
+        // 3. Missing REF_DATE column
+        let df = df!(
+            "WRONG_COLUMN" => &["2020-01"],
+            "VALUE" => &[100.0]
+        )
+        .unwrap();
+        let wrapper = StatCanDataFrame::new(df);
+        let result = wrapper.filter_date_range(2020, 2022);
+        assert!(
+            result.is_err(),
+            "Expected error for missing REF_DATE column"
+        );
     }
 }
