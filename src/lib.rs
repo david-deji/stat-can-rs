@@ -22,6 +22,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::io::BufWriter;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -643,12 +644,14 @@ impl StatCanDriver {
         let mut zip_resp = self.client.get(&download_url).send().await?;
         let zip_path = std::env::temp_dir().join(format!("statcan/{}.zip", pid));
 
-        let mut zip_file = tokio::fs::File::create(&zip_path).await?;
+        let mut zip_file = BufWriter::new(tokio::fs::File::create(&zip_path).await?);
         while let Some(chunk) = zip_resp.chunk().await? {
             use tokio::io::AsyncWriteExt;
             zip_file.write_all(&chunk).await?;
         }
-        zip_file.sync_all().await?;
+        use tokio::io::AsyncWriteExt;
+        zip_file.flush().await?;
+        zip_file.get_ref().sync_all().await?;
         drop(zip_file); // Close file
 
         // 3. Unzip (Blocking)
@@ -1137,12 +1140,14 @@ pub async fn download_and_extract_file(
 
     if is_zip {
         let zip_path = std::env::temp_dir().join(format!("statcan/{}.zip", pid));
-        let mut zip_file = tokio::fs::File::create(&zip_path).await?;
+        let mut zip_file = BufWriter::new(tokio::fs::File::create(&zip_path).await?);
         while let Some(chunk) = resp.chunk().await? {
             use tokio::io::AsyncWriteExt;
             zip_file.write_all(&chunk).await?;
         }
-        zip_file.sync_all().await?;
+        use tokio::io::AsyncWriteExt;
+        zip_file.flush().await?;
+        zip_file.get_ref().sync_all().await?;
         drop(zip_file); // Close file
 
         let zip_path_clone = zip_path.clone();
@@ -1175,12 +1180,14 @@ pub async fn download_and_extract_file(
         let _ = tokio::fs::remove_file(zip_path).await;
     } else {
         // Assume direct CSV download
-        let mut out_file = tokio::fs::File::create(&csv_path).await?;
+        let mut out_file = BufWriter::new(tokio::fs::File::create(&csv_path).await?);
         while let Some(chunk) = resp.chunk().await? {
             use tokio::io::AsyncWriteExt;
             out_file.write_all(&chunk).await?;
         }
-        out_file.sync_all().await?;
+        use tokio::io::AsyncWriteExt;
+        out_file.flush().await?;
+        out_file.get_ref().sync_all().await?;
     }
 
     // Copy to persistent cache if possible
