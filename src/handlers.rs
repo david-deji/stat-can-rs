@@ -342,10 +342,13 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
 
     let all_cubes = resp.object.unwrap_or_default();
 
+    let query_lower = query.to_lowercase();
+    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
     let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
         .iter()
         .filter_map(|c| {
-            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower, &query_terms);
 
             // Only keep results with a reasonable score threshold
             if score > 0.6 {
@@ -596,6 +599,7 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
     let query_lower = query.to_lowercase();
+    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
 
     // Spawn both requests concurrently
     let statcan_future = client.get_all_cubes_list_lite();
@@ -611,7 +615,7 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
         let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
             .iter()
             .filter_map(|c| {
-                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower, &query_terms);
 
                 if score > 0.6 {
                     Some((c, score))
