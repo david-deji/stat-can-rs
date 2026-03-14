@@ -132,6 +132,49 @@ pub struct StatCanErrorResponse {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizedDataset {
+    pub id: String,
+    pub title: String,
+    pub source: String,
+    pub dataset_type: String,
+    pub best_resource_id: Option<String>,
+    pub score: f64,
+}
+
+pub trait DiscoveryNormalizer {
+    fn normalize(&self, query: &str) -> NormalizedDataset;
+}
+
+impl DiscoveryNormalizer for Cube {
+    fn normalize(&self, query: &str) -> NormalizedDataset {
+        let score = crate::data_helpers::score_cube_title_match(&self.cube_title_en, query);
+        NormalizedDataset {
+            id: self.product_id.clone(),
+            title: self.cube_title_en.clone(),
+            source: "StatCan".to_string(),
+            dataset_type: "Cube".to_string(),
+            best_resource_id: None,
+            score,
+        }
+    }
+}
+
+impl DiscoveryNormalizer for crate::PackageMetadata {
+    fn normalize(&self, query: &str) -> NormalizedDataset {
+        let score = strsim::jaro_winkler(&self.title.to_lowercase(), &query.to_lowercase()) + 1.0;
+        let best_resource_id = crate::data_helpers::select_best_resource(&self.resources).map(|r| r.id.clone());
+        NormalizedDataset {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            source: "OpenData".to_string(),
+            dataset_type: "Package".to_string(),
+            best_resource_id,
+            score,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

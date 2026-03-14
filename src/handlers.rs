@@ -92,6 +92,18 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
     Ok(json!({
         "tools": [
             {
+                "name": "discover_datasets",
+                "description": "Unified search across StatCan and Canadian Open Government portals. Use this to find a dataset_id for a topic.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Fuzzy search term (e.g., 'inflation', 'housing starts')" },
+                        "limit": { "type": "integer", "description": "Max results to return (default 10)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "list_cubes",
                 "description": "List all available data cubes (summary). Tip: For discovering specific datasets, consider using 'search_all' or 'search_cubes' instead.",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -594,6 +606,62 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
+pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    use crate::models::DiscoveryNormalizer;
+    let query = args["query"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+    let statcan_future = client.get_all_cubes_list_lite();
+    let od_future = od_client.search_packages(query, limit);
+
+    let (statcan_res, od_res) = tokio::join!(statcan_future, od_future);
+
+    let mut unified_results = Vec::new();
+
+    if let Ok(resp) = statcan_res {
+        let all_cubes = resp.object.unwrap_or_default();
+        let mut scored_cubes: Vec<(crate::models::NormalizedDataset, f64)> = all_cubes
+            .iter()
+            .map(|c| c.normalize(query))
+            .filter(|norm| norm.score > 0.6)
+            .map(|norm| {
+                let s = norm.score;
+                (norm, s)
+            })
+            .collect();
+
+        scored_cubes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        unified_results.extend(scored_cubes.into_iter().take(limit).map(|(c, _)| c));
+    }
+
+    if let Ok(packages) = od_res {
+        let scored_packages: Vec<crate::models::NormalizedDataset> = packages
+            .iter()
+            .map(|p| p.normalize(query))
+            .collect();
+        unified_results.extend(scored_packages.into_iter().take(limit));
+    }
+
+    unified_results.sort_by(|a, b| b.score.total_cmp(&a.score));
+    unified_results.truncate(limit);
+
+    if unified_results.is_empty() {
+        Ok(
+            json!({ "content": [{ "type": "text", "text": "No datasets found matching query in either source." }] }),
+        )
+    } else {
+        let json_str = serde_json::to_string_pretty(&unified_results)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
+    }
+}
+
 pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
     client: Arc<C>,
     od_client: Arc<O>,
@@ -989,6 +1057,7 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
             let args = &params["arguments"];
 
             match name {
+                "discover_datasets" => handle_discover_datasets(client, od_client, args).await,
                 "list_cubes" => handle_list_cubes(client, args).await,
                 "get_metadata" => handle_get_metadata(client, args).await,
                 "get_cube_dimensions" => handle_get_cube_dimensions(client, args).await,
@@ -1070,7 +1139,7 @@ mod tests {
             assert!(schema.is_object(), "'inputSchema' should be an object");
         }
 
-        // Assert that we have 14 tools exactly to be robust and precise as seen in the code.
-        assert_eq!(tools.len(), 14, "There should be exactly 14 tools defined");
+        // Assert that we have 15 tools exactly to be robust and precise as seen in the code.
+        assert_eq!(tools.len(), 15, "There should be exactly 15 tools defined");
     }
 }
