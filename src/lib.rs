@@ -171,6 +171,7 @@ pub type StatCanClient = StatCanDriver;
 pub struct StatCanDriver {
     client: Client,
     cubes_cache: Arc<RwLock<Option<Vec<Cube>>>>,
+    metadata_cache: Arc<RwLock<std::collections::HashMap<String, CubeMetadataResponse>>>,
 }
 
 impl StatCanDriver {
@@ -182,6 +183,7 @@ impl StatCanDriver {
         Ok(Self {
             client,
             cubes_cache: Arc::new(RwLock::new(None)),
+            metadata_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
 
@@ -301,6 +303,18 @@ impl StatCanDriver {
 
     pub async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
         Self::validate_pid(pid)?;
+
+        // 1. Check cache (Read lock)
+        {
+            let cache = self.metadata_cache.read().await;
+            if let Some(meta) = cache.get(pid) {
+                debug!("Cache HIT for getCubeMetadata: {}", pid);
+                return Ok(meta.clone());
+            } else {
+                debug!("Cache MISS for getCubeMetadata: {}", pid);
+            }
+        }
+
         let url = format!("{}/getCubeMetadata", BASE_URL);
         let body_req = json!([{ "productId": pid }]);
         let resp = self.client.post(&url).json(&body_req).send().await?;
@@ -313,6 +327,13 @@ impl StatCanDriver {
             if item.status != "SUCCESS" {
                 return Err(StatCanError::Api(format!("Status: {}", item.status)));
             }
+
+            // 2. Update cache (Write lock)
+            {
+                let mut cache = self.metadata_cache.write().await;
+                cache.insert(pid.to_string(), item.clone());
+            }
+
             Ok(item)
         } else {
             Err(StatCanError::Api("Empty response".to_string()))
