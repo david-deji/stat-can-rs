@@ -1,5 +1,27 @@
+# Rust
 /target
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project Specific
 /prompt_test_script
 /.jules
 /.agent
-cargo.lock
+output_from_mcp.json
+output_stdio.jsonl
+test_csv_input.json
+test_csv_requests.jsonl

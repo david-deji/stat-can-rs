@@ -696,12 +696,13 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
     let format = args["format"].as_str().unwrap_or("json").to_lowercase();
 
     // 1. Fetch Resource as DataFrame using helper
-    let (df, temp_path) = crate::data_helpers::fetch_resource_as_df(client.clone(), resource_id)
-        .await
-        .map_err(|e| {
-            error!("Fetch failed: {}", e);
-            JsonRpcError::new(-32000, e)
-        })?;
+    let (df, temp_path) =
+        crate::data_helpers::fetch_resource_as_df(client.clone(), resource_id)
+            .await
+            .map_err(|e| {
+                error!("Fetch failed: {}", e);
+                JsonRpcError::new(-32000, e)
+            })?;
 
     // 4. Parse with Polars, apply filters, take N rows
     let rows_limit = rows;
@@ -747,7 +748,7 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
                         let mask = ca
                             .into_iter()
                             .map(|opt_val| {
-                                opt_val.is_some_and(|v| v.to_lowercase().contains(&val_lower))
+                                opt_val.map_or(false, |v| v.to_lowercase().contains(&val_lower))
                             })
                             .collect::<polars::prelude::BooleanChunked>();
                         result = result

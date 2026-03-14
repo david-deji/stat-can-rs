@@ -1,0 +1,24 @@
+    Blocking waiting for file lock on build directory
+    Checking statcan-rs v0.1.1 (/home/deji/Documents/Code/comp-audit-suite/stat-can-rs)
+error: redundant field names in struct initialization
+   --> src/lib.rs:715:17
+    |
+715 |                 title: title,
+    |                 ^^^^^^^^^^^^ help: replace it with: `title`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_field_names
+    = note: `-D clippy::redundant-field-names` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::redundant_field_names)]`
+
+error: variable does not need to be mutable
+   --> src/handlers.rs:699:10
+    |
+699 |     let (mut df, temp_path) =
+    |          ----^^
+    |          |
+    |          help: remove this `mut`
+    |
+    = note: `-D unused-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: could not compile `statcan-rs` (lib) due to 2 previous errors

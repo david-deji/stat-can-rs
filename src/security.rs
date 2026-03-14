@@ -1,6 +1,6 @@
-use rand::{Rng, CryptoRng};
-use sha2::{Sha256, Digest};
 use hex;
+use rand::{CryptoRng, Rng};
+use sha2::{Digest, Sha256};
 
 /// Generates a new API key and its hash.
 /// Returns (api_key, key_hash)
@@ -20,8 +20,8 @@ pub fn generate_api_key<R: Rng + CryptoRng>(rng: &mut R) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_generate_api_key_deterministic() {

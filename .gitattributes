@@ -1,0 +1,22 @@
+# Handle line endings automatically
+* text=auto
+
+# Denote all files that are truly binary and should not be modified
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.mov binary
+*.mp4 binary
+*.wmv binary
+
+# Files to be treated as Rust
+*.rs text eol=lf
+
+# Files to be treated as Python
+*.py text eol=lf
+
+# Documentation
+*.md text eol=lf
+LICENSE text eol=lf

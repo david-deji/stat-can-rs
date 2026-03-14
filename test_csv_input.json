@@ -1,0 +1,13 @@
+{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+        "name": "fetch_open_data_resource_snippet",
+        "arguments": {
+            "resource_id": "c00b8591-7e90-4ac8-8fa3-652c2cce0ab6",
+            "rows": 5,
+            "format": "csv"
+        }
+    },
+    "id": 1
+}

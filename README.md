@@ -1,5 +1,7 @@
 # StatCan RS
 
+> **Context Anchor:** This component is the demographic and salary market data engine for the Macro System. For the overarching architecture and vision, see [SYSTEM_ARCHITECTURE](../SYSTEM_ARCHITECTURE.md) and [MISSION](../MISSION.md).
+
 A Rust client and **Model Context Protocol (MCP) Server** for the Statistics Canada API.
 
 ## 🤖 MCP Server (AI Integration)
@@ -109,6 +111,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `get_data_from_cube_pid` | Fetch specific data points by coordinate. |
 | `get_full_cube_from_cube_pid` | Get the download URL for the full table (CSV). |
 | `fetch_full_table` | **Helper**: Downloads and parses full table to DataFrame. |
+
+## Development
+
+This project uses a `Makefile` to simplify common development tasks.
+
+- **Check everything**: `make all`
+- **Format code**: `make fmt`
+- **Lint code**: `make lint`
+- **Run tests**: `make test`
+- **Build project**: `make build`
+
+For more detailed information on setting up your environment and our development process, please see the [Contributing Guide](CONTRIBUTING.md).
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to get started.
+
+## Project History
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of changes in each version.
 
 ## License
 

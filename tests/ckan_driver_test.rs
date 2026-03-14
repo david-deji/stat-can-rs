@@ -97,7 +97,7 @@ async fn test_job_bank_package() {
                 match driver.get_resource_handler(&res.id).await {
                     Ok(handler) => {
                         println!("Handler: {:?}", handler);
-                        if let statcan_rs::DataHandler::DatastoreQuery(rid, _) = handler {
+                        if let DataHandler::DatastoreQuery(rid, _) = handler {
                             println!("Datastore IS active for resource {}", rid);
 
                             // Try a simple SQL query
