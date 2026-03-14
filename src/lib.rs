@@ -47,6 +47,9 @@ pub type Result<T> = std::result::Result<T, StatCanError>;
 
 pub(crate) fn pad_coordinate(coord: &str) -> String {
     let c = coord.trim();
+    if c.is_empty() {
+        return String::new();
+    }
     let parts: Vec<&str> = c.split('.').collect();
     let mut padded_string = c.to_string();
     if parts.len() < 10 {
@@ -1317,9 +1320,9 @@ mod tests {
 
     #[test]
     fn test_pad_coordinate_empty() {
-        // Current logic: "" -> [""] -> len 1 -> needs 9 -> ".0.0.0.0.0.0.0.0.0"
-        // This is arguably a bug but we are testing current behavior after refactor.
-        assert_eq!(pad_coordinate(""), ".0.0.0.0.0.0.0.0.0");
+        // Should return empty string for empty input
+        assert_eq!(pad_coordinate(""), "");
+        assert_eq!(pad_coordinate("   "), "");
     }
 
     #[test]
