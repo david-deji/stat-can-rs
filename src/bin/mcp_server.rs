@@ -9,6 +9,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use constant_time_eq::constant_time_eq;
 use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
@@ -255,15 +256,19 @@ async fn handle_sse_post(
             .and_then(|h| h.to_str().ok());
 
         let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
+            Some(h) => {
+                let token = h.strip_prefix("Bearer ").unwrap_or(h);
+                if token.len() == key.len() {
+                    constant_time_eq(token.as_bytes(), key.as_bytes())
+                } else {
+                    false
+                }
+            }
             None => false,
         };
 
         if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
