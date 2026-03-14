@@ -38,8 +38,8 @@ struct Args {
     #[arg(long, env = "ONET_TRANSPORT")]
     transport: Option<String>,
 
-    /// API Key for HTTP authentication
-    #[arg(long, env = "MCP_API_KEY")]
+    /// API Key for HTTP authentication (DEPRECATED: Use MCP_API_KEY environment variable instead)
+    #[arg(long, env = "MCP_API_KEY", hide = true)]
     api_key: Option<String>,
 
     /// Rate limit (requests per minute) for stdio mode. Default: 60.
@@ -173,6 +173,27 @@ async fn run_sse_server(
         .allow_headers(tower_http::cors::Any)
         .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
 
+    // Start a background task to prune stale sessions
+    let sessions_clone = state.sessions.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600)); // Every 10 minutes
+        loop {
+            interval.tick().await;
+            let mut sessions = sessions_clone.write().unwrap();
+            let now = Instant::now();
+            let mut stale_keys = Vec::new();
+            for (key, session) in sessions.iter() {
+                if now.duration_since(session.created_at) > std::time::Duration::from_secs(3600) { // 1 hour timeout
+                    stale_keys.push(key.clone());
+                }
+            }
+            for key in stale_keys {
+                sessions.remove(&key);
+                info!("Pruned stale session: {}", key);
+            }
+        }
+    });
+
     let app = Router::new()
         .route(
             "/sse",
@@ -255,15 +276,25 @@ async fn handle_sse_post(
             .and_then(|h| h.to_str().ok());
 
         let authorized = match auth_header {
-            Some(h) => h == key || h == format!("Bearer {}", key),
+            Some(h) => {
+                let h_bytes = h.as_bytes();
+                let key_bytes = key.as_bytes();
+
+                let bearer_prefix = "Bearer ";
+                let is_bearer = h.starts_with(bearer_prefix);
+
+                if is_bearer {
+                    let token_bytes = &h_bytes[bearer_prefix.len()..];
+                    token_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(token_bytes, key_bytes)
+                } else {
+                    h_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(h_bytes, key_bytes)
+                }
+            },
             None => false,
         };
 
         if !authorized {
-            error!(
-                "Auth failed. Expected: {:?}, Received: {:?}",
-                key, auth_header
-            );
+            error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
     }
