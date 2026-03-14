@@ -361,7 +361,7 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
         .collect();
 
     // Sort by score descending
-    scored_cubes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored_cubes.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // Take top 100 results and strip the scores for output
     let results: Vec<&crate::models::Cube> =
@@ -630,7 +630,7 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
             })
             .collect();
 
-        scored_cubes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_cubes.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (cube, score) in scored_cubes.into_iter().take(limit) {
             unified_results.push(json!({
@@ -659,9 +659,7 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
     unified_results.sort_by(|a, b| {
         let score_a = a["score"].as_f64().unwrap_or(0.0);
         let score_b = b["score"].as_f64().unwrap_or(0.0);
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        score_b.total_cmp(&score_a)
     });
 
     if unified_results.is_empty() {
