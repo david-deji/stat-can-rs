@@ -1300,6 +1300,29 @@ mod tests {
     }
 
     #[test]
+    fn test_pad_coordinate_eleven_segments() {
+        let long_coord = "1.2.3.4.5.6.7.8.9.10.11";
+        assert_eq!(pad_coordinate(long_coord), long_coord);
+    }
+
+    #[test]
+    fn test_pad_coordinate_ten_segments() {
+        let ten_coord = "1.2.3.4.5.6.7.8.9.10";
+        assert_eq!(pad_coordinate(ten_coord), ten_coord);
+    }
+
+    #[test]
+    fn test_pad_coordinate_malformed() {
+        assert_eq!(pad_coordinate(".."), "...0.0.0.0.0.0.0");
+        assert_eq!(pad_coordinate("1..2"), "1..2.0.0.0.0.0.0.0");
+    }
+
+    #[test]
+    fn test_pad_coordinate_internal_whitespace() {
+        assert_eq!(pad_coordinate("1. 2 .3"), "1. 2 .3.0.0.0.0.0.0.0");
+    }
+
+    #[test]
     fn test_pad_coordinate_no_padding_needed() {
         let full_coord = "1.1.1.1.1.1.1.1.1.1";
         assert_eq!(pad_coordinate(full_coord), full_coord);
