@@ -760,7 +760,6 @@ mod tests {
         assert_eq!(wrapper.resolve_column_name("alu").unwrap(), "Value");
     }
 
-
     #[test]
     fn test_take_n() {
         let df = create_mock_df();

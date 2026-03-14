@@ -216,11 +216,11 @@ pub async fn fetch_resource_as_df<C: CKANClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ResourceMetadata;
-    use crate::PackageMetadata;
-    use crate::DataHandler;
-    use async_trait::async_trait;
     use crate::CKANClient;
+    use crate::DataHandler;
+    use crate::PackageMetadata;
+    use crate::ResourceMetadata;
+    use async_trait::async_trait;
 
     struct MockNoUrlClient;
 
@@ -229,7 +229,11 @@ mod tests {
         async fn ping(&self) -> crate::Result<String> {
             Ok("pong".to_string())
         }
-        async fn search_packages(&self, _query: &str, _limit: usize) -> crate::Result<Vec<PackageMetadata>> {
+        async fn search_packages(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> crate::Result<Vec<PackageMetadata>> {
             Ok(vec![])
         }
         async fn get_package_metadata(&self, id: &str) -> crate::Result<PackageMetadata> {
@@ -247,7 +251,10 @@ mod tests {
         async fn query_datastore(&self, _sql: &str) -> crate::Result<Vec<serde_json::Value>> {
             Ok(vec![])
         }
-        async fn get_resource_schema(&self, _resource_id: &str) -> crate::Result<Vec<(String, String)>> {
+        async fn get_resource_schema(
+            &self,
+            _resource_id: &str,
+        ) -> crate::Result<Vec<(String, String)>> {
             Ok(vec![])
         }
     }
@@ -358,6 +365,9 @@ mod tests {
     async fn test_fetch_resource_as_df_no_url() {
         let client = std::sync::Arc::new(MockNoUrlClient);
         let result = fetch_resource_as_df(client, "test-id").await;
-        assert_eq!(result.unwrap_err(), "Resource has no download URL available");
+        assert_eq!(
+            result.unwrap_err(),
+            "Resource has no download URL available"
+        );
     }
 }
