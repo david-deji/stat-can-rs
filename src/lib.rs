@@ -61,6 +61,19 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
     padded_string
 }
 
+pub(crate) fn validate_pid(pid: &str) -> Result<()> {
+    if pid.is_empty() {
+        return Err(StatCanError::Api("PID cannot be empty".to_string()));
+    }
+    if !pid
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(StatCanError::Api("Invalid PID format".to_string()));
+    }
+    Ok(())
+}
+
 pub trait StatCanClientTrait: CKANClient + Send + Sync {
     fn get_all_cubes_list_lite(&self) -> impl Future<Output = Result<CubeListResponse>> + Send;
     fn get_cube_metadata(
@@ -216,19 +229,6 @@ impl StatCanDriver {
         all_points
     }
 
-    fn validate_pid(pid: &str) -> Result<()> {
-        if pid.is_empty() {
-            return Err(StatCanError::Api("PID cannot be empty".to_string()));
-        }
-        if !pid
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(StatCanError::Api("Invalid PID format".to_string()));
-        }
-        Ok(())
-    }
-
     /// Helper to safely parse API response, handling plain text or HTML errors
     async fn parse_statcan_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
         let status = resp.status();
@@ -305,7 +305,7 @@ impl StatCanDriver {
     }
 
     pub async fn get_cube_metadata(&self, pid: &str) -> Result<CubeMetadataResponse> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
 
         // 1. Check cache (Read lock)
         {
@@ -426,7 +426,7 @@ impl StatCanDriver {
         coords: Vec<String>,
         periods: i32,
     ) -> Result<DataResponse> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         let url = format!("{}/getDataFromCubePidCoordAndLatestNPeriods", BASE_URL);
 
         let payload: Vec<_> = coords
@@ -547,7 +547,7 @@ impl StatCanDriver {
     }
 
     pub async fn fetch_fast_snippet(&self, pid: &str) -> Result<StatCanDataFrame> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         // 1. Get Metadata to find dimensions and valid members
         let metadata = self.get_cube_metadata(pid).await?;
         let meta_obj = metadata
@@ -601,7 +601,7 @@ impl StatCanDriver {
     }
 
     pub async fn get_full_cube_from_cube_pid(&self, pid: &str) -> Result<FullTableResponse> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         let url = format!("{}/getFullTableDownloadCSV/{}/en", BASE_URL, pid);
         let resp = self.client.get(&url).send().await?;
         // Note: Full table download returns metadata JSON, not data. Data is in the URL inside.
@@ -618,7 +618,7 @@ impl StatCanDriver {
     }
 
     async fn get_cache_path(&self, pid: &str) -> Result<std::path::PathBuf> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         let mut path = std::env::temp_dir();
         path.push("statcan");
         tokio::fs::create_dir_all(&path).await.unwrap_or(()); // Ensure dir exists
@@ -675,7 +675,7 @@ impl StatCanDriver {
     }
 
     pub async fn fetch_full_table(&self, pid: &str) -> Result<StatCanDataFrame> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         let csv_path = self.fetch_file_with_cache(pid).await?;
 
         // 4. Parse with Polars (Blocking to avoid stalling async runtime)
@@ -693,7 +693,7 @@ impl StatCanDriver {
     }
 
     pub async fn fetch_full_table_scan(&self, pid: &str) -> Result<StatCanLazyFrame> {
-        Self::validate_pid(pid)?;
+        validate_pid(pid)?;
         let csv_path = self.fetch_file_with_cache(pid).await?;
 
         // LazyCsvReader creation is cheap (just opens file and reads header), so we can do it here.
@@ -1087,6 +1087,7 @@ pub async fn download_and_extract_file(
     url: &str,
     pid: &str,
 ) -> Result<std::path::PathBuf> {
+    validate_pid(pid)?;
     if let Ok(home) = std::env::var("HOME") {
         let cache_dir = std::path::PathBuf::from(home).join(".cache/statcan-rs/resources");
         let cached_path = cache_dir.join(format!("{}.csv", pid));
@@ -1411,5 +1412,32 @@ mod tests {
         // Should succeed for valid PID
         let res_ok = client.get_cache_path("12345678").await;
         assert!(res_ok.is_ok());
+    }
+
+    #[test]
+    fn test_validate_pid_security() {
+        // Valid cases
+        assert!(validate_pid("12345678").is_ok());
+        assert!(validate_pid("cube-123").is_ok());
+        assert!(validate_pid("resource_id_456").is_ok());
+
+        // Invalid cases
+        assert!(validate_pid("").is_err()); // Empty
+        assert!(validate_pid("../etc/passwd").is_err()); // Path traversal
+        assert!(validate_pid("data/results").is_err()); // Directory separator
+        assert!(validate_pid("pid; drop table").is_err()); // Special characters
+        assert!(validate_pid("pid 123").is_err()); // Spaces
+    }
+
+    #[tokio::test]
+    async fn test_download_and_extract_file_security() {
+        let client = reqwest::Client::new();
+        // Should fail immediately due to validate_pid
+        let res = download_and_extract_file(&client, "http://example.com", "../traversal").await;
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StatCanError::Api(msg) => assert_eq!(msg, "Invalid PID format"),
+            _ => panic!("Expected Api error from validation"),
+        }
     }
 }
