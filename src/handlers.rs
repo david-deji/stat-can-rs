@@ -837,23 +837,18 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
                         .find(|c| c.to_lowercase() == col_lower)
                         .map(|c| c.to_string());
 
-                    if let Some(col) = actual_col {
-                        let series = result
-                            .column(&col)
-                            .map_err(|e| format!("Column error: {}", e))?;
-                        let str_series = series
-                            .cast(&polars::prelude::DataType::String)
-                            .map_err(|e| format!("Cast error: {}", e))?;
-                        let ca = str_series.str().map_err(|e| format!("Str error: {}", e))?;
-
-                        let mask = ca
-                            .into_iter()
-                            .map(|opt_val| {
-                                opt_val.is_some_and(|v| v.to_lowercase().contains(&val_lower))
-                            })
-                            .collect::<polars::prelude::BooleanChunked>();
+                    if let Some(col_name) = actual_col {
                         result = result
-                            .filter(&mask)
+                            .lazy()
+                            .filter(
+                                polars::prelude::col(&col_name)
+                                    .cast(polars::prelude::DataType::String)
+                                    .str()
+                                    .to_lowercase()
+                                    .str()
+                                    .contains_literal(polars::prelude::lit(val_lower)),
+                            )
+                            .collect()
                             .map_err(|e| format!("Filter error: {}", e))?;
                     }
                 }
