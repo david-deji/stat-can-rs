@@ -182,7 +182,7 @@ pub async fn fetch_resource_as_df<C: CKANClient>(
     let separator = {
         let mut file = File::open(&temp_path).map_err(|e| e.to_string())?;
         let mut buffer = [0u8; 4096];
-        let n = file.read(&mut buffer).unwrap_or(0);
+        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
         let slice = &buffer[..n];
 
         let commas = slice.iter().filter(|&&c| c == b',').count();
