@@ -71,6 +71,71 @@ pub async fn ensure_utf8_encoding(path: &PathBuf) -> Result<PathBuf, String> {
     Ok(path.clone())
 }
 
+use crate::ResourceMetadata;
+
+/// Selects the best resource from a list of resources based on heuristics.
+pub fn select_best_resource(resources: &[ResourceMetadata]) -> Option<&ResourceMetadata> {
+    if resources.is_empty() {
+        return None;
+    }
+
+    resources.iter().max_by(|a, b| {
+        let score_a = score_resource(a);
+        let score_b = score_resource(b);
+        score_a.cmp(&score_b)
+    })
+}
+
+fn score_resource(resource: &ResourceMetadata) -> i32 {
+    let mut score = 0;
+
+    // Rank formats
+    if let Some(ref format) = resource.format {
+        let format_upper = format.to_uppercase();
+        if format_upper == "CSV" || format_upper == "PARQUET" {
+            score += 100;
+        } else if format_upper == "JSON" {
+            score += 50;
+        }
+    }
+
+    // Heuristics based on name
+    let name_lower = resource.name.to_lowercase();
+    if name_lower.contains("data") || name_lower.contains("table") {
+        score += 20;
+    }
+
+    // Check datastore_active
+    if let Some(true) = resource.datastore_active {
+        score += 30;
+    }
+
+    score
+}
+
+/// Helper function to perform fuzzy matching on cube titles.
+/// It returns a score. Exact matches score highest, then all-terms matches, then fuzzy matches.
+pub fn score_cube_title_match(title: &str, query: &str) -> f64 {
+    let title_lower = title.to_lowercase();
+    let query_lower = query.to_lowercase();
+
+    let is_exact = title_lower.contains(&query_lower);
+
+    let terms: Vec<String> = query_lower.split_whitespace().map(|s| s.to_string()).collect();
+    let has_all_terms = terms.iter().all(|term| title_lower.contains(term));
+
+    let similarity = strsim::jaro_winkler(&title_lower, &query_lower);
+
+    let mut score = similarity;
+    if is_exact {
+        score += 2.0;
+    } else if has_all_terms {
+        score += 1.0;
+    }
+
+    score
+}
+
 /// Helper to download, transcode, and load a DataFrame from a resource ID.
 /// Returns the DataFrame and the path to the temp file (so caller can delete it).
 pub async fn fetch_resource_as_df<C: CKANClient>(
@@ -143,4 +208,109 @@ pub async fn fetch_resource_as_df<C: CKANClient>(
     .map_err(|e| e.to_string())??;
 
     Ok((df, temp_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ResourceMetadata;
+
+    #[test]
+    fn test_select_best_resource_empty() {
+        let resources: Vec<ResourceMetadata> = vec![];
+        assert!(select_best_resource(&resources).is_none());
+    }
+
+    #[test]
+    fn test_select_best_resource_format_ranking() {
+        let resources = vec![
+            ResourceMetadata {
+                id: "1".to_string(),
+                name: "JSON Data".to_string(),
+                format: Some("JSON".to_string()),
+                url: None,
+                datastore_active: None,
+            },
+            ResourceMetadata {
+                id: "2".to_string(),
+                name: "CSV Data".to_string(),
+                format: Some("CSV".to_string()),
+                url: None,
+                datastore_active: None,
+            },
+            ResourceMetadata {
+                id: "3".to_string(),
+                name: "TXT Data".to_string(),
+                format: Some("TXT".to_string()),
+                url: None,
+                datastore_active: None,
+            },
+        ];
+
+        let best = select_best_resource(&resources).unwrap();
+        assert_eq!(best.id, "2"); // CSV preferred over JSON and TXT
+    }
+
+    #[test]
+    fn test_select_best_resource_name_heuristic() {
+        let resources = vec![
+            ResourceMetadata {
+                id: "1".to_string(),
+                name: "Something Else CSV".to_string(),
+                format: Some("CSV".to_string()),
+                url: None,
+                datastore_active: None,
+            },
+            ResourceMetadata {
+                id: "2".to_string(),
+                name: "Important Table CSV".to_string(),
+                format: Some("CSV".to_string()),
+                url: None,
+                datastore_active: None,
+            },
+        ];
+
+        let best = select_best_resource(&resources).unwrap();
+        assert_eq!(best.id, "2"); // "Table" gets a boost
+    }
+
+    #[test]
+    fn test_select_best_resource_datastore_active() {
+        let resources = vec![
+            ResourceMetadata {
+                id: "1".to_string(),
+                name: "Data CSV".to_string(),
+                format: Some("CSV".to_string()),
+                url: None,
+                datastore_active: Some(false),
+            },
+            ResourceMetadata {
+                id: "2".to_string(),
+                name: "Data CSV".to_string(),
+                format: Some("CSV".to_string()),
+                url: None,
+                datastore_active: Some(true),
+            },
+        ];
+
+        let best = select_best_resource(&resources).unwrap();
+        assert_eq!(best.id, "2"); // datastore_active=true gets a boost
+    }
+
+    #[test]
+    fn test_score_cube_title_match() {
+        // Exact substring match + jaro winkler
+        let exact_score = score_cube_title_match("Labour force characteristics by province", "Labour force");
+        assert!(exact_score > 2.0); // 2.0 (exact) + similarity
+
+        // All terms match + jaro winkler
+        let terms_score = score_cube_title_match("Labour force characteristics by province", "force labour");
+        assert!(terms_score > 1.0); // 1.0 (all terms) + similarity
+        assert!(terms_score < 2.0);
+
+        // Fuzzy match
+        let fuzzy_score = score_cube_title_match("Labour force characteristics by province", "Labor forc");
+        assert!(fuzzy_score > 0.0);
+        assert!(fuzzy_score < 1.0);
+    }
 }

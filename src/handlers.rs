@@ -93,12 +93,12 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
         "tools": [
             {
                 "name": "list_cubes",
-                "description": "List all available data cubes (summary)",
+                "description": "List all available data cubes (summary). Tip: For discovering specific datasets, consider using 'search_all' or 'search_cubes' instead.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "get_metadata",
-                "description": "Get metadata for a specific cube",
+                "description": "Get metadata for a specific cube. For dimension details, consider using 'get_cube_dimensions' for easier discovery.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -109,7 +109,7 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
             },
             {
                 "name": "get_cube_dimensions",
-                "description": "Get valid dimensions and members for a cube. Use this to find what 'Geography' or 'Products' filters are available.",
+                "description": "Get valid dimensions and members for a cube. Use this to find what 'Geography' or 'Products' filters are available. Highly recommended before querying full tables.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -121,7 +121,7 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
             },
             {
                 "name": "search_cubes",
-                "description": "Search for cubes by title (supports multi-word queries)",
+                "description": "Search for cubes by title (supports multi-word queries). Ranked by fuzzy search. To explore a found cube's contents, use 'get_cube_dimensions'.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -184,8 +184,20 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
                 }
             },
             {
+                "name": "search_all",
+                "description": "Unified search across both StatCan cubes and the Canadian Open Government portal.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query (e.g. 'labour ontario')" },
+                        "limit": { "type": "integer", "description": "Max results per source (default 10)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "search_open_data",
-                "description": "Search the Canadian Open Government portal for datasets.",
+                "description": "Search the Canadian Open Government portal for datasets. For detailed metadata, follow up with 'get_open_data_metadata'.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -197,7 +209,7 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
             },
             {
                 "name": "get_open_data_metadata",
-                "description": "Get detailed metadata for a specific dataset from the Open Government portal.",
+                "description": "Get detailed metadata for a specific dataset from the Open Government portal. Output will identify a 'suggested_best_resource_id' for subsequent data fetching.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -330,17 +342,26 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
     let resp = client.get_all_cubes_list_lite().await?;
 
     let all_cubes = resp.object.unwrap_or_default();
-    let terms: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
 
-    let results: Vec<&crate::models::Cube> = all_cubes
+    let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
         .iter()
-        .filter(|c| {
-            let title_lower = c.cube_title_en.to_lowercase();
-            // ALL terms must be present (AND logic)
-            terms.iter().all(|term| title_lower.contains(term))
+        .filter_map(|c| {
+            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+
+            // Only keep results with a reasonable score threshold
+            if score > 0.6 {
+                Some((c, score))
+            } else {
+                None
+            }
         })
-        .take(100)
         .collect();
+
+    // Sort by score descending
+    scored_cubes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Take top 100 results and strip the scores for output
+    let results: Vec<&crate::models::Cube> = scored_cubes.into_iter().take(100).map(|(c, _)| c).collect();
 
     if results.is_empty() {
         Ok(json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }))
@@ -569,6 +590,83 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
+pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let query = args["query"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+    let query_lower = query.to_lowercase();
+
+    // Spawn both requests concurrently
+    let statcan_future = client.get_all_cubes_list_lite();
+    let od_future = od_client.search_packages(query, limit);
+
+    let (statcan_res, od_res) = tokio::join!(statcan_future, od_future);
+
+    let mut unified_results = Vec::new();
+
+    // Process StatCan results
+    if let Ok(resp) = statcan_res {
+        let all_cubes = resp.object.unwrap_or_default();
+        let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
+            .iter()
+            .filter_map(|c| {
+                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+
+                if score > 0.6 {
+                    Some((c, score))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored_cubes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (cube, score) in scored_cubes.into_iter().take(limit) {
+            unified_results.push(json!({
+                "source": "StatCan",
+                "id": cube.product_id,
+                "title": cube.cube_title_en,
+                "score": score
+            }));
+        }
+    }
+
+    // Process Open Data results
+    if let Ok(packages) = od_res {
+        for pkg in packages.into_iter().take(limit) {
+            unified_results.push(json!({
+                "source": "OpenData",
+                "id": pkg.id,
+                "title": pkg.title,
+                // Open Data doesn't give us a score directly, we'll assign a default or calculate one
+                "score": strsim::jaro_winkler(&pkg.title.to_lowercase(), &query_lower) + 1.0 // Add 1.0 because CKAN returned it (implies some relevance)
+            }));
+        }
+    }
+
+    // Sort combined results
+    unified_results.sort_by(|a, b| {
+        let score_a = a["score"].as_f64().unwrap_or(0.0);
+        let score_b = b["score"].as_f64().unwrap_or(0.0);
+        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if unified_results.is_empty() {
+        Ok(json!({ "content": [{ "type": "text", "text": "No datasets found matching query in either source." }] }))
+    } else {
+        Ok(
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&unified_results).unwrap() }] }),
+        )
+    }
+}
+
 pub async fn handle_search_open_data<C: CKANClient>(
     client: Arc<C>,
     args: &Value,
@@ -604,6 +702,19 @@ pub async fn handle_get_open_data_metadata<C: CKANClient>(
         error!("Get metadata failed: {}", e);
         JsonRpcError::new(-32000, format!("Get metadata failed: {}", e))
     })?;
+
+    // Optional: add a field or indicator for the "best" resource
+    if let Some(best) = crate::data_helpers::select_best_resource(&meta.resources) {
+        let best_id = best.id.clone();
+        // We could just add a small note or return it alongside
+        let mut meta_json = serde_json::to_value(&meta).unwrap();
+        if let Some(obj) = meta_json.as_object_mut() {
+            obj.insert("suggested_best_resource_id".to_string(), json!(best_id));
+        }
+        return Ok(
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&meta_json).unwrap() }] }),
+        );
+    }
 
     Ok(
         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&meta).unwrap() }] }),
@@ -862,6 +973,7 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
                 "list_cubes" => handle_list_cubes(client, args).await,
                 "get_metadata" => handle_get_metadata(client, args).await,
                 "get_cube_dimensions" => handle_get_cube_dimensions(client, args).await,
+                "search_all" => handle_search_all(client, od_client, args).await,
                 "search_cubes" => handle_search_cubes(client, args).await,
                 "fetch_data_by_vector" => handle_fetch_data_by_vector(client, args).await,
                 "fetch_data_by_coords" => handle_fetch_data_by_coords(client, args).await,

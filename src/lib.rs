@@ -146,6 +146,7 @@ pub struct ResourceMetadata {
     pub name: String,
     pub format: Option<String>,
     pub url: Option<String>,
+    pub datastore_active: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -747,6 +748,7 @@ impl CKANClient for StatCanDriver {
             name: format!("{} (CSV)", obj.cube_title_en),
             format: Some("CSV".to_string()),
             url: None,
+            datastore_active: Some(false),
         };
 
         Ok(PackageMetadata {
@@ -867,6 +869,7 @@ impl CKANClient for GenericCKANDriver {
                         name: res["name"].as_str().unwrap_or_default().to_string(),
                         format: res["format"].as_str().map(|s| s.to_string()),
                         url: res["url"].as_str().map(|s| s.to_string()),
+                        datastore_active: res["datastore_active"].as_bool(),
                     });
                 }
             }
@@ -915,6 +918,7 @@ impl CKANClient for GenericCKANDriver {
                     name: res["name"].as_str().unwrap_or_default().to_string(),
                     format: res["format"].as_str().map(|s| s.to_string()),
                     url: res["url"].as_str().map(|s| s.to_string()),
+                    datastore_active: res["datastore_active"].as_bool(),
                 });
             }
         }
