@@ -157,6 +157,40 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_int_or_string_failure() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct TestStruct {
+            #[serde(deserialize_with = "deserialize_int_or_string")]
+            val: String,
+        }
+
+        // Test with float input
+        let json_float = r#"{"val": 12.34}"#;
+        let res: Result<TestStruct, _> = serde_json::from_str(json_float);
+        assert!(res.is_err(), "Expected error for float input");
+
+        // Test with boolean input
+        let json_bool = r#"{"val": true}"#;
+        let res: Result<TestStruct, _> = serde_json::from_str(json_bool);
+        assert!(res.is_err(), "Expected error for boolean input");
+
+        // Test with array input
+        let json_array = r#"{"val": [1, 2, 3]}"#;
+        let res: Result<TestStruct, _> = serde_json::from_str(json_array);
+        assert!(res.is_err(), "Expected error for array input");
+
+        // Test with object input
+        let json_object = r#"{"val": {"key": "value"}}"#;
+        let res: Result<TestStruct, _> = serde_json::from_str(json_object);
+        assert!(res.is_err(), "Expected error for object input");
+
+        // Test with null input
+        let json_null = r#"{"val": null}"#;
+        let res: Result<TestStruct, _> = serde_json::from_str(json_null);
+        assert!(res.is_err(), "Expected error for null input");
+    }
+
+    #[test]
     fn test_cube_deserialization_with_int_product_id() {
         let json_data = r#"{
             "cubeTitleEn": "Test Cube",
