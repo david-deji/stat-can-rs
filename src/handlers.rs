@@ -92,6 +92,18 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
     Ok(json!({
         "tools": [
             {
+                "name": "discover_datasets",
+                "description": "Unified search across StatCan and Canadian Open Government portals. Use this to find a dataset_id for a topic.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Fuzzy search term (e.g., 'inflation', 'housing starts')" },
+                        "limit": { "type": "integer", "description": "Max results to return (default 10)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "inspect_dataset",
                 "description": "Unified tool to inspect a dataset's metadata, schema, and dimensions from either StatCan or Open Data portals. Use this to understand the data shape and available filters before querying.",
                 "inputSchema": {
@@ -605,6 +617,60 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
+pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    use crate::models::DiscoveryNormalizer;
+    let query = args["query"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+    let statcan_future = client.get_all_cubes_list_lite();
+    let od_future = od_client.search_packages(query, limit);
+
+    let (statcan_res, od_res) = tokio::join!(statcan_future, od_future);
+
+    let mut unified_results = Vec::new();
+
+    if let Ok(resp) = statcan_res {
+        let all_cubes = resp.object.unwrap_or_default();
+        let mut scored_cubes: Vec<(crate::models::NormalizedDataset, f64)> = all_cubes
+            .iter()
+            .map(|c| c.normalize(query))
+            .filter(|norm| norm.score > 0.6)
+            .map(|norm| {
+                let s = norm.score;
+                (norm, s)
+            })
+            .collect();
+
+        scored_cubes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        unified_results.extend(scored_cubes.into_iter().take(limit).map(|(c, _)| c));
+    }
+
+    if let Ok(packages) = od_res {
+        let scored_packages: Vec<crate::models::NormalizedDataset> =
+            packages.iter().map(|p| p.normalize(query)).collect();
+        unified_results.extend(scored_packages.into_iter().take(limit));
+    }
+
+    unified_results.sort_by(|a, b| b.score.total_cmp(&a.score));
+    unified_results.truncate(limit);
+
+    if unified_results.is_empty() {
+        Ok(
+            json!({ "content": [{ "type": "text", "text": "No datasets found matching query in either source." }] }),
+        )
+    } else {
+        let json_str = serde_json::to_string_pretty(&unified_results)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
+    }
+}
+
 pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
     client: Arc<C>,
     od_client: Arc<O>,
@@ -887,17 +953,20 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
             // Apply SQL if provided
             if let Some(sql) = sql_query {
                 let sql_lower = sql.to_lowercase();
-                if sql_lower.contains("read_csv") ||
-                   sql_lower.contains("read_parquet") ||
-                   sql_lower.contains("read_ipc") ||
-                   sql_lower.contains("read_json") ||
-                   sql_lower.contains("read_ndjson") ||
-                   sql_lower.contains("scan_csv") ||
-                   sql_lower.contains("scan_parquet") ||
-                   sql_lower.contains("scan_ipc") ||
-                   sql_lower.contains("scan_ndjson")
+                if sql_lower.contains("read_csv")
+                    || sql_lower.contains("read_parquet")
+                    || sql_lower.contains("read_ipc")
+                    || sql_lower.contains("read_json")
+                    || sql_lower.contains("read_ndjson")
+                    || sql_lower.contains("scan_csv")
+                    || sql_lower.contains("scan_parquet")
+                    || sql_lower.contains("scan_ipc")
+                    || sql_lower.contains("scan_ndjson")
                 {
-                    return Err("SQL error: File reading functions are not permitted for security reasons".to_string());
+                    return Err(
+                        "SQL error: File reading functions are not permitted for security reasons"
+                            .to_string(),
+                    );
                 }
 
                 let mut ctx = polars::sql::SQLContext::new();
@@ -984,7 +1053,6 @@ pub async fn handle_get_open_data_resource_schema<C: CKANClient>(
     }))
 }
 
-
 pub async fn handle_inspect_dataset<C: StatCanClientTrait, O: CKANClient>(
     client: Arc<C>,
     od_client: Arc<O>,
@@ -1045,17 +1113,26 @@ Dimensions & Members:
 
         return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
     } else {
-        let meta = od_client.get_package_metadata(dataset_id).await.map_err(|e| {
-            error!("Open Data metadata error for {}: {}", dataset_id, e);
-            JsonRpcError::new(-32000, format!("Failed to get Open Data metadata: {}", e))
-        })?;
+        let meta = od_client
+            .get_package_metadata(dataset_id)
+            .await
+            .map_err(|e| {
+                error!("Open Data metadata error for {}: {}", dataset_id, e);
+                JsonRpcError::new(-32000, format!("Failed to get Open Data metadata: {}", e))
+            })?;
 
         let best_resource = crate::data_helpers::select_best_resource(&meta.resources);
 
         if let Some(resource) = best_resource {
-            let schema = od_client.get_resource_schema(&resource.id).await.unwrap_or_default();
+            let schema = od_client
+                .get_resource_schema(&resource.id)
+                .await
+                .unwrap_or_default();
 
-            let schema_json = schema.iter().map(|(n, t)| json!({"name": n, "type": t})).collect::<Vec<_>>();
+            let schema_json = schema
+                .iter()
+                .map(|(n, t)| json!({"name": n, "type": t}))
+                .collect::<Vec<_>>();
 
             let output = format!(
                 "Dataset: {} (Open Data UUID: {})
@@ -1077,14 +1154,12 @@ Schema:
                 "Dataset: {} (Open Data UUID: {})
 
 No suitable tabular resources found.",
-                meta.title,
-                dataset_id
+                meta.title, dataset_id
             );
             return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
         }
     }
 }
-
 
 pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
     client: Arc<C>,
@@ -1102,6 +1177,7 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
             let args = &params["arguments"];
 
             match name {
+                "discover_datasets" => handle_discover_datasets(client, od_client, args).await,
                 "list_cubes" => handle_list_cubes(client, args).await,
                 "get_metadata" => handle_get_metadata(client, args).await,
                 "get_cube_dimensions" => handle_get_cube_dimensions(client, args).await,
@@ -1184,7 +1260,7 @@ mod tests {
             assert!(schema.is_object(), "'inputSchema' should be an object");
         }
 
-        // Assert that we have 14 tools exactly to be robust and precise as seen in the code.
+        // Assert that we have 15 tools exactly to be robust and precise as seen in the code.
         assert_eq!(tools.len(), 15, "There should be exactly 15 tools defined");
     }
 }
