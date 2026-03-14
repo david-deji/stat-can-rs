@@ -877,6 +877,20 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
 
             // Apply SQL if provided
             if let Some(sql) = sql_query {
+                let sql_lower = sql.to_lowercase();
+                if sql_lower.contains("read_csv") ||
+                   sql_lower.contains("read_parquet") ||
+                   sql_lower.contains("read_ipc") ||
+                   sql_lower.contains("read_json") ||
+                   sql_lower.contains("read_ndjson") ||
+                   sql_lower.contains("scan_csv") ||
+                   sql_lower.contains("scan_parquet") ||
+                   sql_lower.contains("scan_ipc") ||
+                   sql_lower.contains("scan_ndjson")
+                {
+                    return Err("SQL error: File reading functions are not permitted for security reasons".to_string());
+                }
+
                 let mut ctx = polars::sql::SQLContext::new();
                 ctx.register("data", result.clone().lazy());
                 let sql_df = ctx.execute(&sql).map_err(|e| format!("SQL error: {}", e))?;
