@@ -755,6 +755,53 @@ mod tests {
         assert_eq!(wrapper.resolve_column_name("alu").unwrap(), "Value");
     }
 
+
+    #[test]
+    fn test_take_n() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        let result = wrapper.take_n(2).unwrap();
+        let res = result.as_polars();
+
+        assert_eq!(res.height(), 2);
+
+        let geos: Vec<String> = res
+            .column("GEO")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(geos[0], "Canada");
+        assert_eq!(geos[1], "Ontario");
+    }
+
+    #[test]
+    fn test_take_last_n() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        let result = wrapper.take_last_n(2).unwrap();
+        let res = result.as_polars();
+
+        assert_eq!(res.height(), 2);
+
+        let geos: Vec<String> = res
+            .column("GEO")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(geos[0], "Ontario");
+        assert_eq!(geos[1], "Alberta");
+    }
+
     #[test]
     fn test_inspect_column() {
         let df = create_mock_df();
