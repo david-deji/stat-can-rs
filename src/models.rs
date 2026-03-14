@@ -33,14 +33,14 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CubeMetadataResponse {
     pub object: Option<CubeMetadata>,
     pub status: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CubeMetadata {
     pub cube_title_en: String,
@@ -48,7 +48,7 @@ pub struct CubeMetadata {
     pub dimension: Vec<Dimension>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Dimension {
     pub dimension_name_en: String,
@@ -57,7 +57,7 @@ pub struct Dimension {
     pub member: Vec<Member>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
     pub member_name_en: String,
