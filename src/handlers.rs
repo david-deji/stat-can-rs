@@ -1027,16 +1027,27 @@ mod tests {
 
         let value = result.unwrap();
 
-        let tools_array = value.get("tools").expect("Response should contain a 'tools' key");
+        let tools_array = value
+            .get("tools")
+            .expect("Response should contain a 'tools' key");
         assert!(tools_array.is_array(), "'tools' should be an array");
 
         let tools = tools_array.as_array().unwrap();
         assert!(!tools.is_empty(), "The tools array should not be empty");
 
         for tool in tools {
-            assert!(tool.get("name").is_some(), "Each tool must have a 'name' property");
-            assert!(tool.get("description").is_some(), "Each tool must have a 'description' property");
-            assert!(tool.get("inputSchema").is_some(), "Each tool must have an 'inputSchema' property");
+            assert!(
+                tool.get("name").is_some(),
+                "Each tool must have a 'name' property"
+            );
+            assert!(
+                tool.get("description").is_some(),
+                "Each tool must have a 'description' property"
+            );
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "Each tool must have an 'inputSchema' property"
+            );
 
             let name = tool.get("name").unwrap();
             let description = tool.get("description").unwrap();

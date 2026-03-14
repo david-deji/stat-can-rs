@@ -171,7 +171,12 @@ async fn run_sse_server(
         .allow_origin(tower_http::cors::Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(tower_http::cors::Any)
-        .expose_headers(["Mcp-Session-Id".parse::<axum::http::HeaderName>().unwrap()]);
+        .expose_headers(
+            "Mcp-Session-Id"
+                .parse::<axum::http::HeaderName>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
 
     // Start a background task to prune stale sessions
     let sessions_clone = state.sessions.clone();
