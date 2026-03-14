@@ -104,6 +104,17 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
                 }
             },
             {
+                "name": "inspect_dataset",
+                "description": "Unified tool to inspect a dataset's metadata, schema, and dimensions from either StatCan or Open Data portals. Use this to understand the data shape and available filters before querying.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": { "type": "string", "description": "The Product ID (StatCan) or Package ID (Open Data) of the dataset" }
+                    },
+                    "required": ["dataset_id"]
+                }
+            },
+            {
                 "name": "list_cubes",
                 "description": "List all available data cubes (summary). Tip: For discovering specific datasets, consider using 'search_all' or 'search_cubes' instead.",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -641,10 +652,8 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
     }
 
     if let Ok(packages) = od_res {
-        let scored_packages: Vec<crate::models::NormalizedDataset> = packages
-            .iter()
-            .map(|p| p.normalize(query))
-            .collect();
+        let scored_packages: Vec<crate::models::NormalizedDataset> =
+            packages.iter().map(|p| p.normalize(query)).collect();
         unified_results.extend(scored_packages.into_iter().take(limit));
     }
 
@@ -944,17 +953,20 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
             // Apply SQL if provided
             if let Some(sql) = sql_query {
                 let sql_lower = sql.to_lowercase();
-                if sql_lower.contains("read_csv") ||
-                   sql_lower.contains("read_parquet") ||
-                   sql_lower.contains("read_ipc") ||
-                   sql_lower.contains("read_json") ||
-                   sql_lower.contains("read_ndjson") ||
-                   sql_lower.contains("scan_csv") ||
-                   sql_lower.contains("scan_parquet") ||
-                   sql_lower.contains("scan_ipc") ||
-                   sql_lower.contains("scan_ndjson")
+                if sql_lower.contains("read_csv")
+                    || sql_lower.contains("read_parquet")
+                    || sql_lower.contains("read_ipc")
+                    || sql_lower.contains("read_json")
+                    || sql_lower.contains("read_ndjson")
+                    || sql_lower.contains("scan_csv")
+                    || sql_lower.contains("scan_parquet")
+                    || sql_lower.contains("scan_ipc")
+                    || sql_lower.contains("scan_ndjson")
                 {
-                    return Err("SQL error: File reading functions are not permitted for security reasons".to_string());
+                    return Err(
+                        "SQL error: File reading functions are not permitted for security reasons"
+                            .to_string(),
+                    );
                 }
 
                 let mut ctx = polars::sql::SQLContext::new();
@@ -1041,6 +1053,114 @@ pub async fn handle_get_open_data_resource_schema<C: CKANClient>(
     }))
 }
 
+pub async fn handle_inspect_dataset<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let dataset_id = args["dataset_id"]
+        .as_str()
+        .ok_or_else(|| JsonRpcError::new(-32602, "dataset_id is required"))?;
+
+    let is_statcan_pid = dataset_id.chars().all(|c| c.is_ascii_digit() || c == '-');
+
+    if is_statcan_pid {
+        let meta = client.get_cube_metadata(dataset_id).await.map_err(|e| {
+            error!("StatCan metadata error for {}: {}", dataset_id, e);
+            JsonRpcError::new(-32000, format!("Failed to get StatCan metadata: {}", e))
+        })?;
+
+        let schema = vec![
+            json!({"name": "REF_DATE", "type": "Date"}),
+            json!({"name": "GEO", "type": "String"}),
+            json!({"name": "VALUE", "type": "Float64"}),
+        ];
+
+        let mut dimensions = Vec::new();
+        let mut title = "Unknown".to_string();
+
+        if let Some(ref obj) = meta.object {
+            title = obj.cube_title_en.clone();
+            let dims = &obj.dimension;
+            {
+                for dim in dims {
+                    let members = dim
+                        .member
+                        .iter()
+                        .map(|m| m.member_name_en.clone())
+                        .collect::<Vec<_>>();
+                    dimensions.push(json!({
+                        "name": dim.dimension_name_en,
+                        "members": members
+                    }));
+                }
+            }
+        }
+
+        let output = format!(
+            "Dataset: {} (StatCan PID: {})
+
+Schema:
+{}
+
+Dimensions & Members:
+{}",
+            title,
+            dataset_id,
+            serde_json::to_string_pretty(&schema).unwrap_or_default(),
+            serde_json::to_string_pretty(&dimensions).unwrap_or_default()
+        );
+
+        return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+    } else {
+        let meta = od_client
+            .get_package_metadata(dataset_id)
+            .await
+            .map_err(|e| {
+                error!("Open Data metadata error for {}: {}", dataset_id, e);
+                JsonRpcError::new(-32000, format!("Failed to get Open Data metadata: {}", e))
+            })?;
+
+        let best_resource = crate::data_helpers::select_best_resource(&meta.resources);
+
+        if let Some(resource) = best_resource {
+            let schema = od_client
+                .get_resource_schema(&resource.id)
+                .await
+                .unwrap_or_default();
+
+            let schema_json = schema
+                .iter()
+                .map(|(n, t)| json!({"name": n, "type": t}))
+                .collect::<Vec<_>>();
+
+            let output = format!(
+                "Dataset: {} (Open Data UUID: {})
+Best Resource ID: {}
+Format: {}
+
+Schema:
+{}",
+                meta.title,
+                dataset_id,
+                resource.id,
+                resource.format.as_deref().unwrap_or("Unknown"),
+                serde_json::to_string_pretty(&schema_json).unwrap_or_default()
+            );
+
+            return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+        } else {
+            let output = format!(
+                "Dataset: {} (Open Data UUID: {})
+
+No suitable tabular resources found.",
+                meta.title, dataset_id
+            );
+            return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+        }
+    }
+}
+
 pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
     client: Arc<C>,
     od_client: Arc<O>,
@@ -1075,6 +1195,7 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
                 "fetch_open_data_resource_snippet" => {
                     handle_fetch_open_data_resource_snippet(od_client, args).await
                 }
+                "inspect_dataset" => handle_inspect_dataset(client, od_client, args).await,
                 "get_open_data_resource_schema" => {
                     handle_get_open_data_resource_schema(od_client, args).await
                 }
