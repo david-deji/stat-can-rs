@@ -1024,7 +1024,7 @@ Dimensions & Members:
             serde_json::to_string_pretty(&dimensions).unwrap_or_default()
         );
 
-        return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+        Ok(json!({ "content": [{ "type": "text", "text": output }] }))
     } else {
         let meta = od_client
             .get_package_metadata(dataset_id)
@@ -1061,7 +1061,7 @@ Schema:
                 serde_json::to_string_pretty(&schema_json).unwrap_or_default()
             );
 
-            return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+            Ok(json!({ "content": [{ "type": "text", "text": output }] }))
         } else {
             let output = format!(
                 "Dataset: {} (Open Data UUID: {})
@@ -1069,7 +1069,7 @@ Schema:
 No suitable tabular resources found.",
                 meta.title, dataset_id
             );
-            return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
+            Ok(json!({ "content": [{ "type": "text", "text": output }] }))
         }
     }
 }

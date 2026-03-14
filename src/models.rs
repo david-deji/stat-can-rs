@@ -163,7 +163,8 @@ impl DiscoveryNormalizer for Cube {
 impl DiscoveryNormalizer for crate::PackageMetadata {
     fn normalize(&self, query: &str) -> NormalizedDataset {
         let score = strsim::jaro_winkler(&self.title.to_lowercase(), &query.to_lowercase()) + 1.0;
-        let best_resource_id = crate::data_helpers::select_best_resource(&self.resources).map(|r| r.id.clone());
+        let best_resource_id =
+            crate::data_helpers::select_best_resource(&self.resources).map(|r| r.id.clone());
         NormalizedDataset {
             id: self.id.clone(),
             title: self.title.clone(),
