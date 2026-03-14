@@ -93,190 +93,39 @@ pub fn list_tools() -> Result<Value, JsonRpcError> {
         "tools": [
             {
                 "name": "discover_datasets",
-                "description": "Unified search across StatCan and Canadian Open Government portals. Use this to find a dataset_id for a topic.",
+                "description": "Unified search across both StatCan cubes and the Canadian Open Government portal. Use this to find a target dataset_id.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Fuzzy search term (e.g., 'inflation', 'housing starts')" },
-                        "limit": { "type": "integer", "description": "Max results to return (default 10)" }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "inspect_dataset",
-                "description": "Unified tool to inspect a dataset's metadata, schema, and dimensions from either StatCan or Open Data portals. Use this to understand the data shape and available filters before querying.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "dataset_id": { "type": "string", "description": "The Product ID (StatCan) or Package ID (Open Data) of the dataset" }
-                    },
-                    "required": ["dataset_id"]
-                }
-            },
-            {
-                "name": "list_cubes",
-                "description": "List all available data cubes (summary). Tip: For discovering specific datasets, consider using 'search_all' or 'search_cubes' instead.",
-                "inputSchema": { "type": "object", "properties": {} }
-            },
-            {
-                "name": "get_metadata",
-                "description": "Get metadata for a specific cube. For dimension details, consider using 'get_cube_dimensions' for easier discovery.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID of the cube (e.g. 18100004)" }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "get_cube_dimensions",
-                "description": "Get valid dimensions and members for a cube. Use this to find what 'Geography' or 'Products' filters are available. Highly recommended before querying full tables.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "member_query": { "type": "string", "description": "Optional text to filter member names" }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "search_cubes",
-                "description": "Search for cubes by title (supports multi-word queries). Ranked by fuzzy search. To explore a found cube's contents, use 'get_cube_dimensions'.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query (e.g. 'labour ontario')" }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "fetch_data_by_vector",
-                "description": "Fetch specific data points by Vector ID (e.g. v123456). Most precise method.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "vectors": { "type": "array", "items": { "type": "string" }, "description": "List of Vector IDs" },
-                        "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
-                    },
-                    "required": ["vectors"]
-                }
-            },
-            {
-                "name": "fetch_data_by_coords",
-                "description": "Fetch specific data points by Coordinate string (e.g. '1.1.1.1.1').",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "coords": { "type": "array", "items": { "type": "string" }, "description": "List of Coordinate strings" },
-                        "recent_periods": { "type": "integer", "description": "Number of recent periods to fetch (default: 1)" }
-                    },
-                    "required": ["pid", "coords"]
-                }
-            },
-            {
-                "name": "search_cubes_by_dimension",
-                "description": "Find cubes that contain a specific dimension name (e.g. 'Geography', 'NAICS'). Useful for finding relevant data sets when you know the dimension you need.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "dimension_name": { "type": "string", "description": "Dimension name to search for (case-insensitive substring)" },
-                        "limit": { "type": "integer", "description": "Max number of cubes to return (default 10)" }
-                    },
-                    "required": ["dimension_name"]
-                }
-            },
-            {
-                "name": "fetch_data_snippet",
-                "description": "Fetch data from a cube. Supports filtering by Geography and getting the most recent N periods. Results are sorted most-recent-first by default. Filters use exact match first, falling back to substring.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pid": { "type": "string", "description": "The Product ID" },
-                        "rows": { "type": "integer", "description": "Number of rows to return (default 5). Results are always sorted most-recent-first." },
-                        "geo": { "type": "string", "description": "Filter by Geography (e.g. 'Canada', 'British Columbia')" },
-                        "recent_months": { "type": "integer", "description": "Get ALL rows for the last N time periods. Returns every row (all geographies, industries, etc.) matching those periods." },
-                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs for column filtering. Uses exact match first, then substring fallback (e.g. {'Products and product groups': 'Energy'} matches 'Energy' exactly, not 'All-items excluding energy')" },
-                        "format": { "type": "string", "enum": ["json", "csv"], "description": "The output format. Default is json." }
-                    },
-                    "required": ["pid"]
-                }
-            },
-            {
-                "name": "search_all",
-                "description": "Unified search across both StatCan cubes and the Canadian Open Government portal.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query (e.g. 'labour ontario')" },
                         "limit": { "type": "integer", "description": "Max results per source (default 10)" }
                     },
                     "required": ["query"]
                 }
             },
             {
-                "name": "search_open_data",
-                "description": "Search the Canadian Open Government portal for datasets. For detailed metadata, follow up with 'get_open_data_metadata'.",
+                "name": "inspect_dataset",
+                "description": "Understand the dimensional shape and 'language' of a dataset. Returns schema, dimensions, and members. Use this to figure out what filters to apply in query_data.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Search query (keywords)" },
-                        "limit": { "type": "integer", "description": "Max results (default 10)" }
+                        "dataset_id": { "type": "string", "description": "The StatCan PID (e.g., '18100004') or CKAN Resource ID (UUID)" }
                     },
-                    "required": ["query"]
+                    "required": ["dataset_id"]
                 }
             },
             {
-                "name": "get_open_data_metadata",
-                "description": "Get detailed metadata for a specific dataset from the Open Government portal. Output will identify a 'suggested_best_resource_id' for subsequent data fetching.",
+                "name": "query_data",
+                "description": "The universal data bridge for fetching structured records from a dataset.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "The Dataset (Package) ID" }
-                    },
-                    "required": ["id"]
-                }
-            },
-            {
-                "name": "query_open_data_datastore",
-                "description": "Execute an SQL query against the Canadian Open Government Datastore (for datasets with 'datastore_active'=true).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "sql": { "type": "string", "description": "The SQL query to execute (e.g. 'SELECT * FROM \"resource_id\" LIMIT 5'). Note: Table names must be the Resource ID in double quotes." },
+                        "dataset_id": { "type": "string", "description": "The StatCan PID or CKAN Resource ID" },
+                        "filters": { "type": "object", "properties": {}, "additionalProperties": { "type": "string" }, "description": "Key-value pairs matching dimension members (fuzzy matching permitted)" },
+                        "date_range": { "type": "object", "properties": { "start": { "type": "string" }, "end": { "type": "string" }, "last_n_periods": { "type": "integer" } }, "description": "Date range to fetch" },
                         "format": { "type": "string", "enum": ["json", "csv"], "description": "The output format. Default is json." }
                     },
-                    "required": ["sql"]
-                }
-            },
-            {
-                "name": "fetch_open_data_resource_snippet",
-                "description": "Fetch a small snippet of data from an Open Government resource (CSV) for previewing. Supports SQL queries and column selection.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "resource_id": { "type": "string", "description": "The Resource ID to fetch" },
-                        "rows": { "type": "integer", "description": "Number of rows to return (default 5)" },
-                        "columns": { "type": "array", "items": { "type": "string" }, "description": "List of columns to return. If omitted, all columns are returned." },
-                        "sql": { "type": "string", "description": "Optional SQL query to run against the data. Use 'data' as the table name. Example: SELECT * FROM data WHERE \"Salary Minimum\" > 25" },
-                        "format": { "type": "string", "enum": ["json", "csv"], "description": "The output format. Default is json." }
-                    },
-                    "required": ["resource_id"]
-                }
-            },
-            {
-                "name": "get_open_data_resource_schema",
-                "description": "Get the schema (column names and types) for an Open Government resource.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "resource_id": { "type": "string", "description": "The Resource ID to fetch schema for" }
-                    },
-                    "required": ["resource_id"]
+                    "required": ["dataset_id"]
                 }
             }
         ]
@@ -424,7 +273,7 @@ pub async fn handle_fetch_data_by_vector<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.as_ref().map_or(true, |v| v.is_empty()) {
+    } else if resp.object.as_ref().is_none_or(|v| v.is_empty()) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
         )
@@ -463,7 +312,7 @@ pub async fn handle_fetch_data_by_coords<C: StatCanClientTrait>(
         Ok(
             json!({ "content": [{ "type": "text", "text": format!("Error from StatCan API: {}", resp.status) }] }),
         )
-    } else if resp.object.as_ref().map_or(true, |v| v.is_empty()) {
+    } else if resp.object.as_ref().is_none_or(|v| v.is_empty()) {
         Ok(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
         )
@@ -637,7 +486,7 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
 
     if let Ok(resp) = statcan_res {
         let all_cubes = resp.object.unwrap_or_default();
-        let mut scored_cubes: Vec<(crate::models::NormalizedDataset, f64)> = all_cubes
+        let scored_cubes: Vec<(crate::models::NormalizedDataset, f64)> = all_cubes
             .iter()
             .map(|c| c.normalize(query))
             .filter(|norm| norm.score > 0.6)
@@ -647,6 +496,7 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
             })
             .collect();
 
+        let mut scored_cubes = scored_cubes;
         scored_cubes.sort_by(|a, b| b.1.total_cmp(&a.1));
         unified_results.extend(scored_cubes.into_iter().take(limit).map(|(c, _)| c));
     }
@@ -1034,6 +884,148 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
+pub async fn handle_inspect_dataset<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let dataset_id = args["dataset_id"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing dataset_id"))?;
+
+    // Determine if it's a StatCan PID (numbers only) or CKAN Resource ID (UUID format)
+    let is_statcan = dataset_id.chars().all(|c| c.is_ascii_digit());
+
+    if is_statcan {
+        let resp = client.get_cube_metadata(dataset_id).await?;
+        let metadata = resp
+            .object
+            .ok_or(JsonRpcError::new(-32000, "Table not found"))?;
+
+        // Simplify output: Map Dimension Name -> List of Member Names
+        let dimensions: std::collections::HashMap<String, Vec<String>> = metadata
+            .dimension
+            .into_iter()
+            .map(|d| {
+                let members: Vec<String> = d
+                    .member
+                    .into_iter()
+                    .map(|m| format!("{} (ID: {})", m.member_name_en, m.member_id))
+                    .collect();
+                (d.dimension_name_en, members)
+            })
+            .collect();
+
+        let mut schema = vec![
+            json!({"name": "REF_DATE", "type": "Date"}),
+            json!({"name": "GEO", "type": "String"}),
+            json!({"name": "VALUE", "type": "Float64"}),
+        ];
+
+        for dim_name in dimensions.keys() {
+            schema.push(json!({"name": dim_name, "type": "String"}));
+        }
+
+        let output = json!({
+            "source": "StatCan",
+            "dataset_id": dataset_id,
+            "title": metadata.cube_title_en,
+            "schema": schema,
+            "dimensions": dimensions,
+            "temporal_column": "REF_DATE",
+            "geo_column": "GEO"
+        });
+
+        let json_str = serde_json::to_string_pretty(&output)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
+    } else {
+        // Assume CKAN Resource ID
+        let schema = od_client
+            .get_resource_schema(dataset_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to get schema for {}: {}", dataset_id, e);
+                JsonRpcError::new(-32000, format!("Failed to get schema: {}", e))
+            })?;
+
+        let output = json!({
+            "source": "OpenData",
+            "dataset_id": dataset_id,
+            "schema": schema.into_iter().map(|(n, t)| json!({"name": n, "type": t})).collect::<Vec<Value>>(),
+            // OpenData resources don't have predefined dimensions/members like StatCan cubes
+            "dimensions": {},
+        });
+
+        let json_str = serde_json::to_string_pretty(&output)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
+    }
+}
+
+pub async fn handle_query_data<C: StatCanClientTrait, O: CKANClient>(
+    client: Arc<C>,
+    od_client: Arc<O>,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let dataset_id = args["dataset_id"]
+        .as_str()
+        .ok_or(JsonRpcError::new(-32602, "Missing dataset_id"))?;
+
+    let filters = args["filters"].as_object();
+    let date_range = args["date_range"].as_object();
+    let format = args["format"].as_str().unwrap_or("json").to_lowercase();
+    let is_statcan = dataset_id.chars().all(|c| c.is_ascii_digit());
+
+    if is_statcan {
+        // Map arguments to fetch_data_snippet equivalent functionality
+        let mut new_args = json!({
+            "pid": dataset_id,
+            "format": format
+        });
+
+        if let Some(f) = filters {
+            new_args
+                .as_object_mut()
+                .unwrap()
+                .insert("filters".to_string(), json!(f));
+            if let Some(geo) = f.get("Geography").and_then(|v| v.as_str()) {
+                new_args
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("geo".to_string(), json!(geo));
+            }
+        }
+
+        if let Some(dr) = date_range {
+            if let Some(last_n) = dr.get("last_n_periods").and_then(|v| v.as_u64()) {
+                new_args
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("recent_months".to_string(), json!(last_n));
+            }
+        }
+
+        // Use existing handle_fetch_data_snippet logic
+        handle_fetch_data_snippet(client, &new_args).await
+    } else {
+        // Map arguments to fetch_open_data_resource_snippet equivalent functionality
+        let mut new_args = json!({
+            "resource_id": dataset_id,
+            "format": format
+        });
+
+        if let Some(f) = filters {
+            new_args
+                .as_object_mut()
+                .unwrap()
+                .insert("filters".to_string(), json!(f));
+        }
+
+        handle_fetch_open_data_resource_snippet(od_client, &new_args).await
+    }
+}
+
 pub async fn handle_get_open_data_resource_schema<C: CKANClient>(
     client: Arc<C>,
     args: &Value,
@@ -1178,6 +1170,9 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
 
             match name {
                 "discover_datasets" => handle_discover_datasets(client, od_client, args).await,
+                "inspect_dataset" => handle_inspect_dataset(client, od_client, args).await,
+                "query_data" => handle_query_data(client, od_client, args).await,
+                // Legacy tools (deprecated)
                 "list_cubes" => handle_list_cubes(client, args).await,
                 "get_metadata" => handle_get_metadata(client, args).await,
                 "get_cube_dimensions" => handle_get_cube_dimensions(client, args).await,
@@ -1195,7 +1190,6 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
                 "fetch_open_data_resource_snippet" => {
                     handle_fetch_open_data_resource_snippet(od_client, args).await
                 }
-                "inspect_dataset" => handle_inspect_dataset(client, od_client, args).await,
                 "get_open_data_resource_schema" => {
                     handle_get_open_data_resource_schema(od_client, args).await
                 }
@@ -1260,7 +1254,7 @@ mod tests {
             assert!(schema.is_object(), "'inputSchema' should be an object");
         }
 
-        // Assert that we have 15 tools exactly to be robust and precise as seen in the code.
-        assert_eq!(tools.len(), 15, "There should be exactly 15 tools defined");
+        // Assert that we have exactly 3 tools to be robust and precise as seen in the code.
+        assert_eq!(tools.len(), 3, "There should be exactly 3 tools defined");
     }
 }
