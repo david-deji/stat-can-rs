@@ -13,6 +13,7 @@ use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use statcan_rs::handlers::{handle_request, JsonRpcRequest, JsonRpcResponse};
 use statcan_rs::StatCanClient;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -275,25 +276,7 @@ async fn handle_sse_post(
             .or_else(|| headers.get("authorization"))
             .and_then(|h| h.to_str().ok());
 
-        let authorized = match auth_header {
-            Some(h) => {
-                let h_bytes = h.as_bytes();
-                let key_bytes = key.as_bytes();
-
-                let bearer_prefix = "Bearer ";
-                let is_bearer = h.starts_with(bearer_prefix);
-
-                if is_bearer {
-                    let token_bytes = &h_bytes[bearer_prefix.len()..];
-                    token_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(token_bytes, key_bytes)
-                } else {
-                    h_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(h_bytes, key_bytes)
-                }
-            },
-            None => false,
-        };
-
-        if !authorized {
+        if !is_authorized(auth_header, key) {
             error!("Auth failed.");
             return (StatusCode::UNAUTHORIZED, "Invalid API Key").into_response();
         }
@@ -380,4 +363,64 @@ async fn handle_sse_delete(
         }
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// Constant-time authorization check using SHA-256 hashing.
+fn is_authorized(auth_header: Option<&str>, expected_key: &str) -> bool {
+    let provided_token = match auth_header {
+        Some(h) => {
+            let bearer_prefix = "Bearer ";
+            if h.starts_with(bearer_prefix) {
+                &h[bearer_prefix.len()..]
+            } else {
+                h
+            }
+        }
+        None => return false,
+    };
+
+    // Mitigation for CPU-DoS: Limit the length of the provided token before hashing.
+    // Standard API keys are rarely longer than 256 characters.
+    if provided_token.len() > 1024 {
+        return false;
+    }
+
+    // To prevent timing attacks based on length, we hash both the provided
+    // token and the expected key before comparing them.
+    let provided_hash = Sha256::digest(provided_token.as_bytes());
+    let expected_hash = Sha256::digest(expected_key.as_bytes());
+
+    constant_time_eq::constant_time_eq(&provided_hash, &expected_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_authorized() {
+        let key = "my-secret-key";
+
+        // Valid key
+        assert!(is_authorized(Some("my-secret-key"), key));
+        // Valid key with Bearer prefix
+        assert!(is_authorized(Some("Bearer my-secret-key"), key));
+
+        // Invalid keys
+        assert!(!is_authorized(Some("wrong-key"), key));
+        assert!(!is_authorized(Some("Bearer wrong-key"), key));
+        assert!(!is_authorized(None, key));
+
+        // Edge cases
+        assert!(!is_authorized(Some(""), key));
+        assert!(!is_authorized(Some("Bearer "), key));
+
+        // Different lengths (to ensure no timing leak/short-circuit issues)
+        assert!(!is_authorized(Some("short"), key));
+        assert!(!is_authorized(Some("this-is-a-much-longer-key"), key));
+
+        // Token too long (CPU-DoS mitigation)
+        let long_token = "a".repeat(1025);
+        assert!(!is_authorized(Some(&long_token), key));
+    }
 }
