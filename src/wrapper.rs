@@ -547,6 +547,16 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_geo_no_match() {
+        let df = create_mock_df();
+        let wrapper = StatCanDataFrame::new(df);
+        let filtered = wrapper.filter_geo("NonExistentGeo").unwrap();
+        let res = filtered.as_polars();
+
+        assert_eq!(res.height(), 0);
+    }
+
+    #[test]
     fn test_filter_date_range() {
         let df = create_mock_df();
         let wrapper = StatCanDataFrame::new(df);
