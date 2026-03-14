@@ -115,16 +115,16 @@ fn score_resource(resource: &ResourceMetadata) -> i32 {
 
 /// Helper function to perform fuzzy matching on cube titles.
 /// It returns a score. Exact matches score highest, then all-terms matches, then fuzzy matches.
-pub fn score_cube_title_match(title: &str, query: &str) -> f64 {
+pub fn score_cube_title_match(title: &str, query_lower: &str) -> f64 {
     let title_lower = title.to_lowercase();
-    let query_lower = query.to_lowercase();
 
-    let is_exact = title_lower.contains(&query_lower);
+    let is_exact = title_lower.contains(query_lower);
 
-    let terms: Vec<String> = query_lower.split_whitespace().map(|s| s.to_string()).collect();
-    let has_all_terms = terms.iter().all(|term| title_lower.contains(term));
+    let has_all_terms = query_lower
+        .split_whitespace()
+        .all(|term| title_lower.contains(term));
 
-    let similarity = strsim::jaro_winkler(&title_lower, &query_lower);
+    let similarity = strsim::jaro_winkler(&title_lower, query_lower);
 
     let mut score = similarity;
     if is_exact {
@@ -300,16 +300,25 @@ mod tests {
     #[test]
     fn test_score_cube_title_match() {
         // Exact substring match + jaro winkler
-        let exact_score = score_cube_title_match("Labour force characteristics by province", "Labour force");
+        let exact_score = score_cube_title_match(
+            "Labour force characteristics by province",
+            &"Labour force".to_lowercase(),
+        );
         assert!(exact_score > 2.0); // 2.0 (exact) + similarity
 
         // All terms match + jaro winkler
-        let terms_score = score_cube_title_match("Labour force characteristics by province", "force labour");
+        let terms_score = score_cube_title_match(
+            "Labour force characteristics by province",
+            &"force labour".to_lowercase(),
+        );
         assert!(terms_score > 1.0); // 1.0 (all terms) + similarity
         assert!(terms_score < 2.0);
 
         // Fuzzy match
-        let fuzzy_score = score_cube_title_match("Labour force characteristics by province", "Labor forc");
+        let fuzzy_score = score_cube_title_match(
+            "Labour force characteristics by province",
+            &"Labor forc".to_lowercase(),
+        );
         assert!(fuzzy_score > 0.0);
         assert!(fuzzy_score < 1.0);
     }

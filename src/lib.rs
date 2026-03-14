@@ -1397,3 +1397,41 @@ mod tests {
         assert!(res_ok.is_ok());
     }
 }
+#[cfg(test)]
+mod bench_test {
+    use crate::data_helpers::score_cube_title_match;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_score_cube_title_match() {
+        let titles = vec![
+            "Labour force characteristics by province",
+            "Gross domestic product (GDP) at basic prices, by industry",
+            "Consumer Price Index, monthly, not seasonally adjusted",
+            "Building permits, by type of building and type of work",
+            "Retail trade sales by industry",
+            "Wholesale trade sales by industry",
+            "Employment by industry, monthly, seasonally adjusted",
+            "Unemployment rate by province, monthly",
+            "Average weekly earnings by industry",
+            "Housing starts, under construction and completions",
+        ];
+        let query = "Labour force province";
+
+        let mut large_titles = Vec::new();
+        for _ in 0..10000 {
+            large_titles.extend(titles.clone());
+        }
+
+        let query_lower = query.to_lowercase();
+
+        let start = Instant::now();
+        let mut _sum = 0.0;
+        for title in &large_titles {
+            _sum += score_cube_title_match(title, &query_lower);
+        }
+        let duration = start.elapsed();
+
+        println!("BENCHMARK_BASELINE_DURATION: {:?}", duration);
+    }
+}

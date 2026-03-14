@@ -269,13 +269,15 @@ pub async fn handle_list_cubes<C: StatCanClientTrait>(
     if count > 100 {
         if let Some(ref mut cubes) = resp.object {
             cubes.truncate(50);
-            let json_str = serde_json::to_string_pretty(&cubes).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+            let json_str = serde_json::to_string_pretty(&cubes)
+                .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
             Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
         } else {
             Ok(json!({ "content": [{ "type": "text", "text": "[]" }] }))
         }
     } else {
-        let json_str = serde_json::to_string_pretty(&resp).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&resp)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -288,7 +290,8 @@ pub async fn handle_get_metadata<C: StatCanClientTrait>(
         .as_str()
         .ok_or(JsonRpcError::new(-32602, "Missing pid"))?;
     let resp = client.get_cube_metadata(pid).await?;
-    let json_str = serde_json::to_string_pretty(&resp.object).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+    let json_str = serde_json::to_string_pretty(&resp.object)
+        .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
     Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
 }
 
@@ -327,7 +330,8 @@ pub async fn handle_get_cube_dimensions<C: StatCanClientTrait>(
         })
         .collect();
 
-    let json_str = serde_json::to_string_pretty(&simplified).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+    let json_str = serde_json::to_string_pretty(&simplified)
+        .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
     Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
 }
 
@@ -340,12 +344,13 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
         .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
     let resp = client.get_all_cubes_list_lite().await?;
 
+    let query_lower = query.to_lowercase();
     let all_cubes = resp.object.unwrap_or_default();
 
     let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
         .iter()
         .filter_map(|c| {
-            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
 
             // Only keep results with a reasonable score threshold
             if score > 0.6 {
@@ -360,12 +365,14 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
     scored_cubes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Take top 100 results and strip the scores for output
-    let results: Vec<&crate::models::Cube> = scored_cubes.into_iter().take(100).map(|(c, _)| c).collect();
+    let results: Vec<&crate::models::Cube> =
+        scored_cubes.into_iter().take(100).map(|(c, _)| c).collect();
 
     if results.is_empty() {
         Ok(json!({ "content": [{ "type": "text", "text": "No cubes found matching query." }] }))
     } else {
-        let json_str = serde_json::to_string_pretty(&results).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&results)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -400,7 +407,8 @@ pub async fn handle_fetch_data_by_vector<C: StatCanClientTrait>(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested vector(s). Please verify the ID." }] }),
         )
     } else {
-        let json_str = serde_json::to_string_pretty(&resp.object).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&resp.object)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -438,7 +446,8 @@ pub async fn handle_fetch_data_by_coords<C: StatCanClientTrait>(
             json!({ "content": [{ "type": "text", "text": "No data found for the requested coordinate(s)." }] }),
         )
     } else {
-        let json_str = serde_json::to_string_pretty(&resp.object).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&resp.object)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -467,7 +476,8 @@ pub async fn handle_search_cubes_by_dimension<C: StatCanClientTrait>(
         })
         .collect::<Vec<_>>());
 
-    let json_str = serde_json::to_string_pretty(&output_json).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+    let json_str = serde_json::to_string_pretty(&output_json)
+        .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
     Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
 }
 
@@ -611,7 +621,8 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
         let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
             .iter()
             .filter_map(|c| {
-                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+                let score =
+                    crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
 
                 if score > 0.6 {
                     Some((c, score))
@@ -650,13 +661,18 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
     unified_results.sort_by(|a, b| {
         let score_a = a["score"].as_f64().unwrap_or(0.0);
         let score_b = b["score"].as_f64().unwrap_or(0.0);
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     if unified_results.is_empty() {
-        Ok(json!({ "content": [{ "type": "text", "text": "No datasets found matching query in either source." }] }))
+        Ok(
+            json!({ "content": [{ "type": "text", "text": "No datasets found matching query in either source." }] }),
+        )
     } else {
-        let json_str = serde_json::to_string_pretty(&unified_results).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&unified_results)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -678,7 +694,8 @@ pub async fn handle_search_open_data<C: CKANClient>(
     if packages.is_empty() {
         Ok(json!({ "content": [{ "type": "text", "text": "No datasets found matching query." }] }))
     } else {
-        let json_str = serde_json::to_string_pretty(&packages).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&packages)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
     }
 }
@@ -700,15 +717,18 @@ pub async fn handle_get_open_data_metadata<C: CKANClient>(
     if let Some(best) = crate::data_helpers::select_best_resource(&meta.resources) {
         let best_id = best.id.clone();
         // We could just add a small note or return it alongside
-        let mut meta_json = serde_json::to_value(&meta).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let mut meta_json = serde_json::to_value(&meta)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         if let Some(obj) = meta_json.as_object_mut() {
             obj.insert("suggested_best_resource_id".to_string(), json!(best_id));
         }
-        let json_str = serde_json::to_string_pretty(&meta_json).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&meta_json)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
         return Ok(json!({ "content": [{ "type": "text", "text": json_str }] }));
     }
 
-    let json_str = serde_json::to_string_pretty(&meta).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
+    let json_str = serde_json::to_string_pretty(&meta)
+        .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?;
     Ok(json!({ "content": [{ "type": "text", "text": json_str }] }))
 }
 
@@ -780,7 +800,8 @@ pub async fn handle_query_open_data_datastore<C: CKANClient>(
             })?
         }
     } else {
-        serde_json::to_string_pretty(&records).map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?
+        serde_json::to_string_pretty(&records)
+            .map_err(|e| JsonRpcError::new(-32000, format!("Serialization error: {}", e)))?
     };
 
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
