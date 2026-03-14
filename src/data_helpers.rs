@@ -313,4 +313,84 @@ mod tests {
         assert!(fuzzy_score > 0.0);
         assert!(fuzzy_score < 1.0);
     }
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_already_utf8() {
+        let path = std::env::temp_dir().join(format!("test_utf8_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::write(&path, b"Hello, world! 123").unwrap();
+
+        let result = crate::data_helpers::ensure_utf8_encoding(&path).await.unwrap();
+        assert_eq!(result, path);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16le_bom() {
+        let path = std::env::temp_dir().join(format!("test_utf16le_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // "Hello" in UTF-16LE with BOM
+        let mut content = vec![0xFF, 0xFE];
+        content.extend_from_slice(b"H\x00e\x00l\x00l\x00o\x00");
+        std::fs::write(&path, content).unwrap();
+
+        let result = crate::data_helpers::ensure_utf8_encoding(&path).await.unwrap();
+        assert_ne!(result, path);
+
+        let utf8_content = std::fs::read_to_string(&result).unwrap();
+        assert_eq!(utf8_content, "Hello");
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(result).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16be_bom() {
+        let path = std::env::temp_dir().join(format!("test_utf16be_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // "Hello" in UTF-16BE with BOM
+        let mut content = vec![0xFE, 0xFF];
+        content.extend_from_slice(b"\x00H\x00e\x00l\x00l\x00o");
+        std::fs::write(&path, content).unwrap();
+
+        let result = crate::data_helpers::ensure_utf8_encoding(&path).await.unwrap();
+        assert_ne!(result, path);
+
+        let utf8_content = std::fs::read_to_string(&result).unwrap();
+        assert_eq!(utf8_content, "Hello");
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(result).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_heuristic_le() {
+        let path = std::env::temp_dir().join(format!("test_heur_le_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // "Hello World!" in UTF-16LE without BOM (needs length > 10 for heuristic)
+        let content = b"H\x00e\x00l\x00l\x00o\x00 \x00W\x00o\x00r\x00l\x00d\x00!\x00";
+        std::fs::write(&path, content).unwrap();
+
+        let result = crate::data_helpers::ensure_utf8_encoding(&path).await.unwrap();
+        assert_ne!(result, path);
+
+        let utf8_content = std::fs::read_to_string(&result).unwrap();
+        assert_eq!(utf8_content, "Hello World!");
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(result).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_heuristic_be() {
+        let path = std::env::temp_dir().join(format!("test_heur_be_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // "Hello World!" in UTF-16BE without BOM
+        let content = b"\x00H\x00e\x00l\x00l\x00o\x00 \x00W\x00o\x00r\x00l\x00d\x00!";
+        std::fs::write(&path, content).unwrap();
+
+        let result = crate::data_helpers::ensure_utf8_encoding(&path).await.unwrap();
+        assert_ne!(result, path);
+
+        let utf8_content = std::fs::read_to_string(&result).unwrap();
+        assert_eq!(utf8_content, "Hello World!");
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(result).unwrap();
+    }
 }
