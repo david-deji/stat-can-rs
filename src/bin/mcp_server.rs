@@ -183,7 +183,8 @@ async fn run_sse_server(
             let now = Instant::now();
             let mut stale_keys = Vec::new();
             for (key, session) in sessions.iter() {
-                if now.duration_since(session.created_at) > std::time::Duration::from_secs(3600) { // 1 hour timeout
+                if now.duration_since(session.created_at) > std::time::Duration::from_secs(3600) {
+                    // 1 hour timeout
                     stale_keys.push(key.clone());
                 }
             }
@@ -285,11 +286,13 @@ async fn handle_sse_post(
 
                 if is_bearer {
                     let token_bytes = &h_bytes[bearer_prefix.len()..];
-                    token_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(token_bytes, key_bytes)
+                    token_bytes.len() == key_bytes.len()
+                        && constant_time_eq::constant_time_eq(token_bytes, key_bytes)
                 } else {
-                    h_bytes.len() == key_bytes.len() && constant_time_eq::constant_time_eq(h_bytes, key_bytes)
+                    h_bytes.len() == key_bytes.len()
+                        && constant_time_eq::constant_time_eq(h_bytes, key_bytes)
                 }
-            },
+            }
             None => false,
         };
 

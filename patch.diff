@@ -1,0 +1,29 @@
+<<<<<<< SEARCH
+            // Apply filters if provided
+            if let Some(ref filter_pairs) = filters_owned {
+                for (col_name, col_val) in filter_pairs {
+                    let col_lower = col_name.to_lowercase();
+                    let val_lower = col_val.to_lowercase();
+                    let actual_col = result
+                        .get_column_names()
+                        .iter()
+                        .find(|c| c.to_lowercase() == col_lower)
+                        .map(|c| c.to_string());
+
+                    if let Some(col) = actual_col {
+=======
+            // Apply filters if provided
+            if let Some(ref filter_pairs) = filters_owned {
+                let col_map: std::collections::HashMap<String, String> = result
+                    .get_column_names()
+                    .iter()
+                    .map(|c| (c.to_lowercase(), c.to_string()))
+                    .collect();
+
+                for (col_name, col_val) in filter_pairs {
+                    let col_lower = col_name.to_lowercase();
+                    let val_lower = col_val.to_lowercase();
+                    let actual_col = col_map.get(&col_lower).cloned();
+
+                    if let Some(col) = actual_col {
+>>>>>>> REPLACE
