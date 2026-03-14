@@ -2869,6 +2869,7 @@ dependencies = [
  "governor",
  "hex",
  "home",
+ "http 1.4.0",
  "polars",
  "postgrest",
  "pyo3",
