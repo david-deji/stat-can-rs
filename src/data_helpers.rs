@@ -259,6 +259,43 @@ mod tests {
         }
     }
 
+    struct MockDownloadFailClient;
+
+    #[async_trait]
+    impl CKANClient for MockDownloadFailClient {
+        async fn ping(&self) -> crate::Result<String> {
+            Ok("pong".to_string())
+        }
+        async fn search_packages(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> crate::Result<Vec<PackageMetadata>> {
+            Ok(vec![])
+        }
+        async fn get_package_metadata(&self, id: &str) -> crate::Result<PackageMetadata> {
+            Ok(PackageMetadata {
+                id: id.to_string(),
+                title: "Test Package".to_string(),
+                notes: None,
+                url: None,
+                resources: vec![],
+            })
+        }
+        async fn get_resource_handler(&self, _resource_id: &str) -> crate::Result<DataHandler> {
+            Ok(DataHandler::BlobDownload("http://127.0.0.1:0/nonexistent.csv".to_string()))
+        }
+        async fn query_datastore(&self, _sql: &str) -> crate::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        async fn get_resource_schema(
+            &self,
+            _resource_id: &str,
+        ) -> crate::Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+    }
+
     #[test]
     fn test_select_best_resource_empty() {
         let resources: Vec<ResourceMetadata> = vec![];
@@ -368,6 +405,18 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             "Resource has no download URL available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_resource_as_df_download_fail() {
+        let client = std::sync::Arc::new(MockDownloadFailClient);
+        let result = fetch_resource_as_df(client, "test-id-fail").await;
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("Download failed"),
+            "Expected 'Download failed' error, got: {}",
+            err_msg
         );
     }
 }
