@@ -1136,6 +1136,151 @@ pub async fn handle_request<C: StatCanClientTrait, O: CKANClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{CubeListResponse, CubeMetadataResponse, DataResponse};
+    use crate::PackageMetadata;
+    use crate::{StatCanDataFrame, StatCanLazyFrame, DataHandler};
+    use crate::StatCanError;
+    use async_trait::async_trait;
+
+    struct MockStatCanClient {
+        pub metadata_response: Option<Result<CubeMetadataResponse, StatCanError>>,
+    }
+
+    #[async_trait]
+    impl crate::CKANClient for MockStatCanClient {
+        async fn ping(&self) -> Result<String, StatCanError> {
+            Ok("pong".to_string())
+        }
+        async fn search_packages(&self, _query: &str, _limit: usize) -> Result<Vec<PackageMetadata>, StatCanError> {
+            Ok(vec![])
+        }
+        async fn get_package_metadata(&self, _id: &str) -> Result<PackageMetadata, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn get_resource_handler(&self, _resource_id: &str) -> Result<DataHandler, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn query_datastore(&self, _sql: &str) -> Result<Vec<serde_json::Value>, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn get_resource_schema(&self, _resource_id: &str) -> Result<Vec<(String, String)>, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+    }
+
+    impl StatCanClientTrait for MockStatCanClient {
+        async fn get_all_cubes_list_lite(&self) -> Result<CubeListResponse, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn get_cube_metadata(&self, _pid: &str) -> Result<CubeMetadataResponse, StatCanError> {
+            if let Some(ref resp) = self.metadata_response {
+                match resp {
+                    Ok(r) => Ok(r.clone()),
+                    Err(e) => Err(StatCanError::Api(e.to_string())), // Simplification for cloning
+                }
+            } else {
+                Err(StatCanError::Api("Not implemented".to_string()))
+            }
+        }
+        async fn find_cubes_by_dimension(
+            &self,
+            _dim_query: &str,
+            _limit: usize,
+        ) -> Result<Vec<(String, String, String)>, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn get_data_from_vectors(
+            &self,
+            _vectors: Vec<String>,
+            _periods: i32,
+        ) -> Result<DataResponse, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn get_data_from_coords(
+            &self,
+            _pid: &str,
+            _coords: Vec<String>,
+            _periods: i32,
+        ) -> Result<DataResponse, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn fetch_fast_snippet(&self, _pid: &str) -> Result<StatCanDataFrame, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn fetch_full_table(&self, _pid: &str) -> Result<StatCanDataFrame, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+        async fn fetch_full_table_scan(&self, _pid: &str) -> Result<StatCanLazyFrame, StatCanError> {
+            Err(StatCanError::Api("Not implemented".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_metadata_missing_pid() {
+        let mock_client = Arc::new(MockStatCanClient {
+            metadata_response: None,
+        });
+
+        let args = json!({});
+
+        let result = handle_get_metadata(mock_client, &args).await;
+        assert!(result.is_err(), "Expected error response");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "Missing pid");
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_metadata_success() {
+        let mock_client = Arc::new(MockStatCanClient {
+            metadata_response: Some(Ok(CubeMetadataResponse {
+                object: Some(crate::models::CubeMetadata {
+                    cube_title_en: "Test Cube".to_string(),
+                    product_id: "12345678".to_string(),
+                    dimension: vec![],
+                }),
+                status: "SUCCESS".to_string(),
+            })),
+        });
+
+        let args = json!({
+            "pid": "12345678"
+        });
+
+        let result = handle_get_metadata(mock_client, &args).await;
+        assert!(result.is_ok(), "Expected success response");
+
+        let response = result.unwrap();
+        let content_array = response.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content_array.len(), 1);
+
+        let content_obj = content_array[0].as_object().unwrap();
+        assert_eq!(content_obj.get("type").unwrap().as_str().unwrap(), "text");
+
+        let text = content_obj.get("text").unwrap().as_str().unwrap();
+        assert!(text.contains("Test Cube"));
+        assert!(text.contains("12345678"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_metadata_client_error() {
+        let mock_client = Arc::new(MockStatCanClient {
+            metadata_response: Some(Err(StatCanError::Api("Simulated API error".to_string()))),
+        });
+
+        let args = json!({
+            "pid": "12345678"
+        });
+
+        let result = handle_get_metadata(mock_client, &args).await;
+        assert!(result.is_err(), "Expected error response");
+
+        let err = result.unwrap_err();
+        // Since From<StatCanError> for JsonRpcError handles Api errors as -32000
+        assert_eq!(err.code, -32000);
+        assert_eq!(err.message, "API error: Simulated API error");
+    }
 
     #[test]
     fn test_list_tools() {
