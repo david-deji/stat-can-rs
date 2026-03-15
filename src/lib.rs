@@ -1076,13 +1076,27 @@ async fn enforce_cache_limit(cache_dir: &std::path::Path, max_files: usize) -> R
     }
     let mut entries = tokio::fs::read_dir(cache_dir).await?;
     let mut files = Vec::new();
+    let mut join_set = tokio::task::JoinSet::new();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(100)); // Limit to 100 concurrent stats
+
     while let Some(entry) = entries.next_entry().await? {
-        if let Ok(metadata) = entry.metadata().await {
-            if metadata.is_file() {
-                if let Ok(modified) = metadata.modified() {
-                    files.push((entry.path(), modified));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        join_set.spawn(async move {
+            let _permit = permit;
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() {
+                    if let Ok(modified) = metadata.modified() {
+                        return Some((entry.path(), modified));
+                    }
                 }
             }
+            None
+        });
+    }
+
+    while let Some(res) = join_set.join_next().await {
+        if let Ok(Some(file_info)) = res {
+            files.push(file_info);
         }
     }
 
