@@ -67,3 +67,24 @@ async fn test_fetch_data_by_vector_periods() {
     let dates: std::collections::HashSet<_> = points.iter().map(|p| &p.ref_date).collect();
     assert_eq!(dates.len(), 2, "Expected 2 distinct dates");
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_find_cubes_by_dimension() {
+    let client = StatCanClient::new().unwrap();
+    // Use a common dimension like "Geography"
+    let result = client.find_cubes_by_dimension("Geography", 5).await;
+
+    assert!(result.is_ok(), "Failed to search cubes by dimension: {:?}", result.err());
+    let results = result.unwrap();
+
+    // Check that we got at least some results (and no more than requested)
+    assert!(results.len() > 0, "Expected to find at least one cube with the 'Geography' dimension");
+    assert!(results.len() <= 5, "Expected no more than 5 results");
+
+    // Check structure
+    let (pid, title, matching_dims) = &results[0];
+    assert!(!pid.is_empty(), "Product ID should not be empty");
+    assert!(!title.is_empty(), "Title should not be empty");
+    assert!(matching_dims.to_lowercase().contains("geography"), "Matching dimensions should contain our query");
+}
