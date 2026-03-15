@@ -60,3 +60,5 @@ http = "1.4.0"
 tokio = { version = "1.0", features = ["full"] }
 chrono = "0.4"
 tower = { version = "0.5.3", features = ["util"] }
+async-trait = "0.1.89"
+mockall = "0.14.0"
