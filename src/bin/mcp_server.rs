@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -229,8 +229,15 @@ async fn run_sse_server(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct SessionQuery {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+}
+
 async fn handle_sse_post(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionQuery>,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
@@ -238,27 +245,60 @@ async fn handle_sse_post(
     let is_notification = req.id.is_none();
 
     let session_id = if is_initialize {
-        let new_id = Uuid::new_v4().to_string();
-        let mut sessions = state.sessions.write().unwrap();
-        sessions.insert(
-            new_id.clone(),
-            Session {
-                id: new_id.clone(),
-                created_at: Instant::now(),
-            },
-        );
-        Some(new_id)
+        // For initialize, we either use the one from query/header if provided, or generate a new one if not found
+        let existing_id = query.session_id.or_else(|| {
+            headers
+                .get("mcp-session-id")
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string())
+        });
+
+        match existing_id {
+            Some(id) => {
+                let sessions = state.sessions.read().unwrap();
+                if sessions.contains_key(&id) {
+                    Some(id)
+                } else {
+                    // If provided ID doesn't exist, we must create it (to support standard handshakes)
+                    let mut sessions = state.sessions.write().unwrap();
+                    sessions.insert(
+                        id.clone(),
+                        Session {
+                            id: id.clone(),
+                            created_at: Instant::now(),
+                        },
+                    );
+                    Some(id)
+                }
+            }
+            None => {
+                let new_id = Uuid::new_v4().to_string();
+                let mut sessions = state.sessions.write().unwrap();
+                sessions.insert(
+                    new_id.clone(),
+                    Session {
+                        id: new_id.clone(),
+                        created_at: Instant::now(),
+                    },
+                );
+                Some(new_id)
+            }
+        }
     } else {
         // Validate session
-        if let Some(id_val) = headers.get("mcp-session-id") {
-            if let Ok(id) = id_val.to_str() {
-                let sessions = state.sessions.read().unwrap();
-                if sessions.contains_key(id) {
-                    Some(id.to_string())
-                } else {
-                    None
-                }
+        let id_candidate = query.session_id.or_else(|| {
+            headers
+                .get("mcp-session-id")
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string())
+        });
+
+        if let Some(id) = id_candidate {
+            let sessions = state.sessions.read().unwrap();
+            if sessions.contains_key(&id) {
+                Some(id)
             } else {
+                info!("Session not found: {}", id);
                 None
             }
         } else {
@@ -267,9 +307,10 @@ async fn handle_sse_post(
     };
 
     if !is_initialize && session_id.is_none() {
+        error!("Unauthorized: Session not found or missing sessionId");
         return (
             StatusCode::UNAUTHORIZED,
-            "Missing or invalid Mcp-Session-Id header",
+            "Missing or invalid sessionId (use query param ?sessionId=... or Mcp-Session-Id header)",
         )
             .into_response();
     }
@@ -336,17 +377,24 @@ async fn handle_sse_post(
 }
 
 async fn handle_sse_get(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if headers.get("mcp-session-id").is_some() {
-        // Streamable HTTP: no notification stream needed (unless we implement server push)
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
 
-    // Legacy SSE: create session + stream with endpoint event
-    // For legacy clients that expect SSE immediately without Mcp-Session-Id header on GET
-    // We should probably just return an endpoint event pointing to POST /sse
+    let session_id = Uuid::new_v4().to_string();
+    {
+        let mut sessions = state.sessions.write().unwrap();
+        sessions.insert(
+            session_id.clone(),
+            Session {
+                id: session_id.clone(),
+                created_at: Instant::now(),
+            },
+        );
+    }
 
     let host = headers
         .get("host")
@@ -360,13 +408,20 @@ async fn handle_sse_get(
     let endpoint_url = format!("{}://{}/sse", scheme, host);
 
     // Initial event: endpoint
-    let endpoint_event = Event::default().event("endpoint").data(format!(
-        "{}?sessionId={}",
-        endpoint_url,
-        Uuid::new_v4()
-    )); // Legacy clients might expect sessionId param
+    let endpoint_event = Event::default()
+        .event("endpoint")
+        .data(format!("{}?sessionId={}", endpoint_url, session_id));
 
-    // Keep the stream open but send nothing else
+    info!("New session created: {}", session_id);
+
+    // Monitor session in background to prune if client disconnects (optional, but good for logs)
+    let sid_clone = session_id.clone();
+    tokio::spawn(async move {
+        // We don't have a direct way to know when SSE disconnects here without tokio_stream
+        // but the pruning task in main handles the timeout.
+        info!("SSE connection established for session: {}", sid_clone);
+    });
+
     let pending = stream::pending::<Result<Event, Infallible>>();
     let stream = stream::once(async { Ok(endpoint_event) }).chain(pending);
 
