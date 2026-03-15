@@ -218,6 +218,22 @@ mod tests {
     use super::*;
     use crate::CKANClient;
     use crate::DataHandler;
+    use std::io::Write;
+
+    // Returns a TempPath to ensure cleanup when it goes out of scope,
+    // and the PathBuf for calling the function.
+    fn create_temp_encoded_file(content: &[u8], extension: &str) -> (tempfile::TempPath, PathBuf) {
+        let mut temp_file = tempfile::Builder::new()
+            .suffix(extension)
+            .tempfile()
+            .expect("Failed to create temp file");
+        temp_file
+            .write_all(content)
+            .expect("Failed to write to temp file");
+        let temp_path = temp_file.into_temp_path();
+        let path_buf = temp_path.to_path_buf();
+        (temp_path, path_buf)
+    }
     use crate::PackageMetadata;
     use crate::ResourceMetadata;
     use async_trait::async_trait;
@@ -257,6 +273,101 @@ mod tests {
         ) -> crate::Result<Vec<(String, String)>> {
             Ok(vec![])
         }
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16_le_bom() {
+        let utf8_text = "id,name\n1,Test\n";
+        let mut content = vec![0xFF, 0xFE]; // UTF-16LE BOM
+                                            // encode utf8_text as UTF-16LE
+        for codepoint in utf8_text.encode_utf16() {
+            content.push((codepoint & 0xFF) as u8);
+            content.push((codepoint >> 8) as u8);
+        }
+        let (_temp_guard, path) = create_temp_encoded_file(&content, ".csv");
+
+        let result = ensure_utf8_encoding(&path).await.unwrap();
+
+        assert_ne!(result, path);
+        assert_eq!(result.extension().unwrap(), "csv");
+        let read_content = std::fs::read(&result).unwrap();
+        assert_eq!(String::from_utf8(read_content).unwrap(), utf8_text);
+
+        let _ = std::fs::remove_file(result);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16_be_bom() {
+        let utf8_text = "id,name\n1,Test\n";
+        let mut content = vec![0xFE, 0xFF]; // UTF-16BE BOM
+                                            // encode utf8_text as UTF-16BE
+        for codepoint in utf8_text.encode_utf16() {
+            content.push((codepoint >> 8) as u8);
+            content.push((codepoint & 0xFF) as u8);
+        }
+        let (_temp_guard, path) = create_temp_encoded_file(&content, ".csv");
+
+        let result = ensure_utf8_encoding(&path).await.unwrap();
+
+        assert_ne!(result, path);
+        let read_content = std::fs::read(&result).unwrap();
+        assert_eq!(String::from_utf8(read_content).unwrap(), utf8_text);
+
+        let _ = std::fs::remove_file(result);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16_le_heuristic() {
+        // Need string long enough to trigger the > 10 bytes and > 80% of odd bytes being nulls heuristic
+        let utf8_text = "id,name\n1,Test\n2,Another\n3,Third\n";
+        let mut content = vec![];
+        // encode utf8_text as UTF-16LE without BOM
+        for codepoint in utf8_text.encode_utf16() {
+            content.push((codepoint & 0xFF) as u8);
+            content.push((codepoint >> 8) as u8);
+        }
+        let (_temp_guard, path) = create_temp_encoded_file(&content, ".csv");
+
+        let result = ensure_utf8_encoding(&path).await.unwrap();
+
+        assert_ne!(result, path);
+        let read_content = std::fs::read(&result).unwrap();
+        assert_eq!(String::from_utf8(read_content).unwrap(), utf8_text);
+
+        let _ = std::fs::remove_file(result);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf16_be_heuristic() {
+        // Need string long enough to trigger the > 10 bytes and > 80% of even bytes being nulls heuristic
+        let utf8_text = "id,name\n1,Test\n2,Another\n3,Third\n";
+        let mut content = vec![];
+        // encode utf8_text as UTF-16BE without BOM
+        for codepoint in utf8_text.encode_utf16() {
+            content.push((codepoint >> 8) as u8);
+            content.push((codepoint & 0xFF) as u8);
+        }
+        let (_temp_guard, path) = create_temp_encoded_file(&content, ".csv");
+
+        let result = ensure_utf8_encoding(&path).await.unwrap();
+
+        assert_ne!(result, path);
+        let read_content = std::fs::read(&result).unwrap();
+        assert_eq!(String::from_utf8(read_content).unwrap(), utf8_text);
+
+        let _ = std::fs::remove_file(result);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_utf8_encoding_utf8_no_bom() {
+        let content = b"id,name\n1,Test\n";
+        let (_temp_guard, path) = create_temp_encoded_file(content, ".csv");
+
+        let result = ensure_utf8_encoding(&path).await.unwrap();
+
+        assert_eq!(result, path);
+        let read_content = std::fs::read(&result).unwrap();
+        assert_eq!(read_content, content);
     }
 
     #[test]
