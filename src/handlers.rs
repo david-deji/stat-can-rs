@@ -675,10 +675,10 @@ pub async fn handle_query_open_data_datastore<C: CKANClient>(
         } else {
             // Convert Vec<Value> into a CSV string
             let mut wtr = csv::Writer::from_writer(Vec::new());
-            let headers = if let Some(first) = records.first() {
+            let headers: Vec<&str> = if let Some(first) = records.first() {
                 first
                     .as_object()
-                    .map(|obj| obj.keys().cloned().collect::<Vec<String>>())
+                    .map(|obj| obj.keys().map(|k| k.as_str()).collect())
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -692,21 +692,27 @@ pub async fn handle_query_open_data_datastore<C: CKANClient>(
 
                 for row in &records {
                     if let Some(obj) = row.as_object() {
-                        let vals: Vec<String> = headers
-                            .iter()
-                            .map(|k| {
-                                obj.get(k)
-                                    .map(|v| {
-                                        if let Some(s) = v.as_str() {
-                                            s.to_string()
-                                        } else {
-                                            v.to_string()
-                                        }
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        wtr.write_record(&vals).map_err(|e| {
+                        for key in &headers {
+                            if let Some(val) = obj.get(*key) {
+                                if let Some(s) = val.as_str() {
+                                    wtr.write_field(s).map_err(|e| {
+                                        error!("CSV field error: {}", e);
+                                        JsonRpcError::new(-32000, "Internal server error")
+                                    })?;
+                                } else {
+                                    wtr.write_field(val.to_string()).map_err(|e| {
+                                        error!("CSV field error: {}", e);
+                                        JsonRpcError::new(-32000, "Internal server error")
+                                    })?;
+                                }
+                            } else {
+                                wtr.write_field("").map_err(|e| {
+                                    error!("CSV field error: {}", e);
+                                    JsonRpcError::new(-32000, "Internal server error")
+                                })?;
+                            }
+                        }
+                        wtr.write_record(None::<&[u8]>).map_err(|e| {
                             error!("CSV row error: {}", e);
                             JsonRpcError::new(-32000, "Internal server error")
                         })?;

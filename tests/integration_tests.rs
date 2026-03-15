@@ -1,5 +1,4 @@
 use statcan_rs::StatCanClient;
-use tokio;
 
 #[tokio::test]
 #[ignore]
@@ -9,7 +8,7 @@ async fn test_get_all_cubes_list_lite() {
     assert!(result.is_ok());
     let response = result.unwrap();
     assert_eq!(response.status, "SUCCESS");
-    assert!(response.object.unwrap().len() > 0);
+    assert!(!response.object.unwrap().is_empty());
 }
 
 #[tokio::test]
