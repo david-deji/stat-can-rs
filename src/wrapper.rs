@@ -156,12 +156,11 @@ impl StatCanDataFrame {
             return Ok(c.to_string());
         }
 
-        // 3. Substring Match (e.g. "geo" -> "Geography")
-        // Check if query is contained in column, OR column is contained in query (less likely)
-        if let Some(c) = cols
-            .iter()
-            .find(|&&c| c.to_lowercase().contains(&query_lower))
-        {
+        // 3. Substring Match (e.g. "GEO" -> "Geography", or "Geography" -> "GEO")
+        // Check if query is contained in column, OR column is contained in query
+        if let Some(c) = cols.iter().find(|&&c| {
+            c.to_lowercase().contains(&query_lower) || query_lower.contains(&c.to_lowercase())
+        }) {
             return Ok(c.to_string());
         }
 
@@ -228,6 +227,8 @@ impl StatCanDataFrame {
             .0
             .column("REF_DATE")
             .map_err(|_| StatCanError::Api("REF_DATE column not found".to_string()))?
+            .cast(&DataType::String)
+            .map_err(|e| StatCanError::Api(format!("Could not cast REF_DATE to string: {}", e)))?
             .unique()?;
 
         // Sort unique dates descending (lexicographic works for YYYY-MM format)
@@ -249,7 +250,7 @@ impl StatCanDataFrame {
 
         // 3. Filter to only rows matching those dates using `is_in`
         let s = Series::new("REF_DATE", &top_dates_str);
-        let filter_expr = col("REF_DATE").is_in(lit(s));
+        let filter_expr = col("REF_DATE").cast(DataType::String).is_in(lit(s));
 
         let df = self.0.lazy().filter(filter_expr).collect()?;
 
@@ -299,11 +300,10 @@ impl StatCanLazyFrame {
             return Ok(c.to_string());
         }
 
-        // 3. Substring Match (e.g. "geo" -> "Geography")
-        if let Some(c) = cols
-            .iter()
-            .find(|c| c.to_lowercase().contains(&query_lower))
-        {
+        // 3. Substring Match (e.g. "GEO" -> "Geography", or "Geography" -> "GEO")
+        if let Some(c) = cols.iter().find(|c| {
+            c.to_lowercase().contains(&query_lower) || query_lower.contains(&c.to_lowercase())
+        }) {
             return Ok(c.to_string());
         }
 
@@ -425,7 +425,7 @@ impl StatCanLazyFrame {
         let unique_dates_df = self
             .0
             .clone()
-            .select([col("REF_DATE")])
+            .select([col("REF_DATE").cast(DataType::String)])
             .unique(None, UniqueKeepStrategy::First)
             .sort(
                 "REF_DATE",
@@ -452,7 +452,7 @@ impl StatCanLazyFrame {
         }
 
         let s = Series::new("REF_DATE", &top_dates_str);
-        let filter_expr = col("REF_DATE").is_in(lit(s));
+        let filter_expr = col("REF_DATE").cast(DataType::String).is_in(lit(s));
 
         let lf = self.0.filter(filter_expr);
         Ok(Self(lf))
