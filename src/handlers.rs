@@ -88,6 +88,32 @@ impl From<StatCanError> for JsonRpcError {
 
 // --- Core Logic ---
 
+fn serialize_df(df: &mut DataFrame, format: &str) -> Result<String, JsonRpcError> {
+    let mut buf = Vec::new();
+    if format == "csv" {
+        polars::prelude::CsvWriter::new(&mut buf)
+            .include_header(true)
+            .finish(df)
+            .map_err(|e| {
+                error!("CSV serialization error: {}", e);
+                JsonRpcError::new(-32000, format!("CSV serialization error: {}", e))
+            })?;
+    } else {
+        polars::prelude::JsonWriter::new(&mut buf)
+            .with_json_format(polars::prelude::JsonFormat::Json)
+            .finish(df)
+            .map_err(|e| {
+                error!("Serialization error: {}", e);
+                JsonRpcError::new(-32000, format!("Serialization error: {}", e))
+            })?;
+    }
+
+    String::from_utf8(buf).map_err(|e| {
+        error!("UTF-8 error: {}", e);
+        JsonRpcError::new(-32000, format!("Encoding error: {}", e))
+    })
+}
+
 pub fn list_tools() -> Result<Value, JsonRpcError> {
     Ok(json!({
         "tools": [
@@ -371,33 +397,7 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
         if let Ok(df) = client.fetch_fast_snippet(pid).await {
             if df.as_polars().height() > 0 {
                 let mut polars_df = df.into_polars();
-                let output = if format == "csv" {
-                    let mut buf = Vec::new();
-                    polars::prelude::CsvWriter::new(&mut buf)
-                        .include_header(true)
-                        .finish(&mut polars_df)
-                        .map_err(|e| {
-                            error!("CSV serialization error: {}", e);
-                            JsonRpcError::new(-32000, "Internal server error")
-                        })?;
-                    String::from_utf8(buf).map_err(|e| {
-                        error!("UTF-8 error: {}", e);
-                        JsonRpcError::new(-32000, "Internal server error")
-                    })?
-                } else {
-                    let mut buf = Vec::new();
-                    polars::prelude::JsonWriter::new(&mut buf)
-                        .with_json_format(polars::prelude::JsonFormat::Json)
-                        .finish(&mut polars_df)
-                        .map_err(|e| {
-                            error!("Serialization error: {}", e);
-                            JsonRpcError::new(-32000, "Internal server error")
-                        })?;
-                    String::from_utf8(buf).map_err(|e| {
-                        error!("UTF-8 error: {}", e);
-                        JsonRpcError::new(-32000, "Internal server error")
-                    })?
-                };
+                let output = serialize_df(&mut polars_df, &format)?;
                 return Ok(json!({ "content": [{ "type": "text", "text": output }] }));
             }
         }
@@ -436,33 +436,7 @@ pub async fn handle_fetch_data_snippet<C: StatCanClientTrait>(
 
     // Format output
     let mut df = df_wrapper.collect()?.into_polars();
-    let output = if format == "csv" {
-        let mut buf = Vec::new();
-        polars::prelude::CsvWriter::new(&mut buf)
-            .include_header(true)
-            .finish(&mut df)
-            .map_err(|e| {
-                error!("CSV serialization error: {}", e);
-                JsonRpcError::new(-32000, "Internal server error")
-            })?;
-        String::from_utf8(buf).map_err(|e| {
-            error!("UTF-8 error: {}", e);
-            JsonRpcError::new(-32000, "Internal server error")
-        })?
-    } else {
-        let mut buf = Vec::new();
-        polars::prelude::JsonWriter::new(&mut buf)
-            .with_json_format(polars::prelude::JsonFormat::Json)
-            .finish(&mut df)
-            .map_err(|e| {
-                error!("Serialization error: {}", e);
-                JsonRpcError::new(-32000, "Internal server error")
-            })?;
-        String::from_utf8(buf).map_err(|e| {
-            error!("UTF-8 error: {}", e);
-            JsonRpcError::new(-32000, "Internal server error")
-        })?
-    };
+    let output = serialize_df(&mut df, &format)?;
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
 
@@ -853,33 +827,7 @@ pub async fn handle_fetch_open_data_resource_snippet<C: CKANClient>(
 
     // 5. Serialize output
     let mut df = df_result;
-    let output = if format == "csv" {
-        let mut buf = Vec::new();
-        polars::prelude::CsvWriter::new(&mut buf)
-            .include_header(true)
-            .finish(&mut df)
-            .map_err(|e| {
-                error!("CSV serialization error: {}", e);
-                JsonRpcError::new(-32000, format!("CSV serialization error: {}", e))
-            })?;
-        String::from_utf8(buf).map_err(|e| {
-            error!("UTF-8 error: {}", e);
-            JsonRpcError::new(-32000, format!("Encoding error: {}", e))
-        })?
-    } else {
-        let mut buf = Vec::new();
-        polars::prelude::JsonWriter::new(&mut buf)
-            .with_json_format(polars::prelude::JsonFormat::Json)
-            .finish(&mut df)
-            .map_err(|e| {
-                error!("Serialization error: {}", e);
-                JsonRpcError::new(-32000, format!("Serialization error: {}", e))
-            })?;
-        String::from_utf8(buf).map_err(|e| {
-            error!("UTF-8 error: {}", e);
-            JsonRpcError::new(-32000, format!("Encoding error: {}", e))
-        })?
-    };
+    let output = serialize_df(&mut df, &format)?;
 
     Ok(json!({ "content": [{ "type": "text", "text": output }] }))
 }
