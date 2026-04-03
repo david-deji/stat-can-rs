@@ -1178,4 +1178,17 @@ mod tests {
         // Assert that we have exactly 3 tools to be robust and precise as seen in the code.
         assert_eq!(tools.len(), 3, "There should be exactly 3 tools defined");
     }
+
+    #[tokio::test]
+    async fn test_handle_get_metadata_missing_pid() {
+        let client = Arc::new(crate::StatCanClient::new().unwrap());
+        let args = json!({});
+
+        let result = handle_get_metadata(client, &args).await;
+
+        assert!(result.is_err(), "Expected an error due to missing pid");
+        let err = result.unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "Missing pid");
+    }
 }
