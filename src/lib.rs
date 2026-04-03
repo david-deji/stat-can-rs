@@ -63,13 +63,13 @@ pub(crate) fn pad_coordinate(coord: &str) -> String {
 }
 
 pub(crate) fn validate_pid(pid: &str) -> Result<()> {
-    if pid.is_empty() {
-        return Err(StatCanError::Api("PID cannot be empty".to_string()));
-    }
-    if !pid
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
+    static PID_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = PID_REGEX.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
+
+    if !re.is_match(pid) {
+        if pid.is_empty() {
+            return Err(StatCanError::Api("PID cannot be empty".to_string()));
+        }
         return Err(StatCanError::Api("Invalid PID format".to_string()));
     }
     Ok(())
