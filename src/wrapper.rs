@@ -575,6 +575,29 @@ mod tests {
     }
 
     #[test]
+    fn test_lazy_filter_date_range() {
+        let lf = create_mock_df().lazy();
+        let wrapper = StatCanLazyFrame::new(lf);
+        // 2021 to 2022
+        let filtered = wrapper.filter_date_range(2021, 2022).unwrap();
+        let res = filtered.into_polars().collect().unwrap();
+
+        assert_eq!(res.height(), 2); // 2021-06 and 2022-12
+
+        let dates: Vec<String> = res
+            .column("REF_DATE")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|s: &str| s.to_string())
+            .collect();
+        assert!(dates.contains(&"2021-06".to_string()));
+        assert!(dates.contains(&"2022-12".to_string()));
+    }
+
+    #[test]
     fn test_filter_column_simple() {
         let df = create_mock_df();
         let wrapper = StatCanDataFrame::new(df);

@@ -79,7 +79,7 @@ async fn test_dimension_search() {
                 println!("- [{}]: {} (Dims: {})", pid, title, matching_dims);
                 assert!(matching_dims.to_lowercase().contains("geography"));
             }
-            assert!(cubes.len() > 0);
+            assert!(!cubes.is_empty());
             assert!(cubes.len() <= limit);
         }
         Err(e) => {
