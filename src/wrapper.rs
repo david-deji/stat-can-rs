@@ -856,4 +856,85 @@ mod tests {
             "Expected error for missing REF_DATE column"
         );
     }
+
+    #[test]
+    fn test_lazy_filter_geo() {
+        let df = create_mock_df();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        let filtered = wrapper.filter_geo("Ontario").unwrap();
+        let collected = filtered.collect().unwrap();
+        let res = collected.as_polars();
+
+        assert_eq!(res.height(), 1);
+        assert_eq!(
+            res.column("GEO").unwrap().get(0).unwrap(),
+            AnyValue::String("Ontario")
+        );
+    }
+
+    #[test]
+    fn test_lazy_filter_geo_fuzzy_column() {
+        let df = df!(
+            "Geography" => &["Canada", "Ontario", "Alberta"],
+            "VALUE" => &[100.0, 200.0, 300.0]
+        )
+        .unwrap();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        let filtered = wrapper.filter_geo("Canada").unwrap();
+        let collected = filtered.collect().unwrap();
+        let res = collected.as_polars();
+
+        assert_eq!(res.height(), 1);
+        assert_eq!(
+            res.column("Geography").unwrap().get(0).unwrap(),
+            AnyValue::String("Canada")
+        );
+    }
+
+    #[test]
+    fn test_lazy_filter_geo_case_insensitive() {
+        let df = create_mock_df();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        // Match "ontario" (lower) against "Ontario" (Title)
+        let filtered = wrapper.filter_geo("ontario").unwrap();
+        let collected = filtered.collect().unwrap();
+        let res = collected.as_polars();
+
+        assert_eq!(res.height(), 1);
+        assert_eq!(
+            res.column("GEO").unwrap().get(0).unwrap(),
+            AnyValue::String("Ontario")
+        );
+    }
+
+    #[test]
+    fn test_lazy_filter_geo_lowercase_variant() {
+        let df = df!(
+            "geo" => &["Canada", "Ontario", "Alberta"],
+            "VALUE" => &[100.0, 200.0, 300.0]
+        )
+        .unwrap();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        let filtered = wrapper.filter_geo("Alberta").unwrap();
+        let collected = filtered.collect().unwrap();
+        let res = collected.as_polars();
+
+        assert_eq!(res.height(), 1);
+        assert_eq!(
+            res.column("geo").unwrap().get(0).unwrap(),
+            AnyValue::String("Alberta")
+        );
+    }
+
+    #[test]
+    fn test_lazy_filter_geo_missing_column() {
+        let df = df!(
+            "WRONG_COL" => &["Canada", "Ontario", "Alberta"],
+            "VALUE" => &[100.0, 200.0, 300.0]
+        )
+        .unwrap();
+        let wrapper = StatCanLazyFrame::new(df.lazy());
+        let result = wrapper.filter_geo("Canada");
+        assert!(result.is_err());
+    }
 }
