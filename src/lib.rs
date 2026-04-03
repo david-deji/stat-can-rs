@@ -24,7 +24,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::io::BufWriter;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 const BASE_URL: &str = "https://www150.statcan.gc.ca/t1/wds/rest";
 
@@ -1025,10 +1025,13 @@ impl CKANClient for GenericCKANDriver {
             // Try to parse error message
             let status = resp.status();
             let error_text = resp.text().await.unwrap_or_default();
-            // Pass back the raw error for debugging if parsing fails
+
+            // Log the raw error internally, but do not expose it to the client
+            error!("SQL query failed ({}): {}", status, error_text);
+
             return Err(StatCanError::Api(format!(
-                "SQL query failed ({}): {}",
-                status, error_text
+                "SQL query failed with status {}",
+                status
             )));
         }
 
