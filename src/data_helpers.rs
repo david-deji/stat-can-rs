@@ -481,4 +481,78 @@ mod tests {
             "Resource has no download URL available"
         );
     }
+
+    struct MockDatastoreUrlClient {
+        url: String,
+    }
+
+    #[async_trait]
+    impl CKANClient for MockDatastoreUrlClient {
+        async fn ping(&self) -> crate::Result<String> {
+            Ok("pong".to_string())
+        }
+        async fn search_packages(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> crate::Result<Vec<PackageMetadata>> {
+            Ok(vec![])
+        }
+        async fn get_package_metadata(&self, id: &str) -> crate::Result<PackageMetadata> {
+            Ok(PackageMetadata {
+                id: id.to_string(),
+                title: "Test Package".to_string(),
+                notes: None,
+                url: None,
+                resources: vec![],
+            })
+        }
+        async fn get_resource_handler(&self, resource_id: &str) -> crate::Result<DataHandler> {
+            Ok(DataHandler::DatastoreQuery(
+                resource_id.to_string(),
+                Some(self.url.clone()),
+            ))
+        }
+        async fn query_datastore(&self, _sql: &str) -> crate::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        async fn get_resource_schema(
+            &self,
+            _resource_id: &str,
+        ) -> crate::Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_resource_as_df_datastore_with_url() {
+        use axum::{routing::get, Router};
+
+        let csv_data = "id,name\n1,Test\n2,Other";
+
+        let app = Router::new().route("/data.csv", get(move || async { csv_data }));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("http://{}/data.csv", addr);
+        let client = std::sync::Arc::new(MockDatastoreUrlClient { url });
+
+        let (df, temp_path) = fetch_resource_as_df(client, "test-resource-datastore")
+            .await
+            .unwrap();
+
+        assert_eq!(df.height(), 2);
+        assert_eq!(df.column("id").unwrap().get(0).unwrap().to_string(), "1");
+        assert_eq!(
+            df.column("name").unwrap().get(0).unwrap().to_string(),
+            "Test"
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+    }
 }
