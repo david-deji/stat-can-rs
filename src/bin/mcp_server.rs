@@ -167,16 +167,34 @@ async fn run_sse_server(
         api_key,
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
+    let mut cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers(tower_http::cors::Any)
-        .expose_headers(
-            "Mcp-Session-Id"
-                .parse::<axum::http::HeaderName>()
-                .into_iter()
-                .collect::<Vec<_>>(),
-        );
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::HeaderName::from_static("x-api-key"),
+            axum::http::header::HeaderName::from_static("mcp-session-id"),
+        ])
+        .expose_headers([axum::http::header::HeaderName::from_static("mcp-session-id")]);
+
+    if let Ok(origins_str) = std::env::var("MCP_CORS_ALLOWED_ORIGINS") {
+        let origins = origins_str
+            .split(',')
+            .map(|s| s.trim().parse::<axum::http::HeaderValue>())
+            .collect::<Result<Vec<_>, _>>();
+
+        match origins {
+            Ok(origins) => {
+                cors = cors.allow_origin(origins);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to parse MCP_CORS_ALLOWED_ORIGINS: {}. Defaulting to restrictive CORS policy.",
+                    e
+                );
+            }
+        }
+    }
 
     // Start a background task to prune stale sessions
     let sessions_clone = state.sessions.clone();
