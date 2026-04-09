@@ -1,19 +1,19 @@
 use crate::CKANClient;
 use encoding_rs::{UTF_16BE, UTF_16LE};
 use polars::prelude::*;
-use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
 /// Ensure file is valid UTF-8, transcoding from UTF-16 if necessary.
 /// Returns the path to the UTF-8 file (which may be a new temp file or the original).
 pub async fn ensure_utf8_encoding(path: &PathBuf) -> Result<PathBuf, String> {
     // 1. Read first chunk to detect BOM/Encoding
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
     let mut buffer = [0u8; 4096];
-    let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+    let n = file.read(&mut buffer).await.map_err(|e| e.to_string())?;
     let slice = &buffer[..n];
 
     // Check BOMs
@@ -43,7 +43,7 @@ pub async fn ensure_utf8_encoding(path: &PathBuf) -> Result<PathBuf, String> {
         );
 
         // Read entire file
-        let content = std::fs::read(path).map_err(|e| e.to_string())?;
+        let content = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
 
         // Decode
         let (cow, _, had_errors) = if is_be {
@@ -58,12 +58,16 @@ pub async fn ensure_utf8_encoding(path: &PathBuf) -> Result<PathBuf, String> {
 
         // Write to new temp file
         let new_path = path.with_extension("utf8.csv");
-        let mut out = File::create(&new_path).map_err(|e| e.to_string())?;
+        let mut out = tokio::fs::File::create(&new_path)
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Write standard UTF-8 BOM just in case (optional, but helps some readers)
-        // out.write_all(&[0xEF, 0xBB, 0xBF]).map_err(|e| e.to_string())?;
+        // out.write_all(&[0xEF, 0xBB, 0xBF]).await.map_err(|e| e.to_string())?;
 
-        out.write_all(cow.as_bytes()).map_err(|e| e.to_string())?;
+        out.write_all(cow.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
 
         return Ok(new_path);
     }
@@ -180,9 +184,11 @@ pub async fn fetch_resource_as_df<C: CKANClient>(
 
     // 5. Detect Separator
     let separator = {
-        let mut file = File::open(&temp_path).map_err(|e| e.to_string())?;
+        let mut file = tokio::fs::File::open(&temp_path)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut buffer = [0u8; 4096];
-        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        let n = file.read(&mut buffer).await.map_err(|e| e.to_string())?;
         let slice = &buffer[..n];
 
         let commas = slice.iter().filter(|&&c| c == b',').count();
