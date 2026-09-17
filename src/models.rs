@@ -143,12 +143,12 @@ pub struct NormalizedDataset {
 }
 
 pub trait DiscoveryNormalizer {
-    fn normalize(&self, query: &str) -> NormalizedDataset;
+    fn normalize(&self, query_lower: &str) -> NormalizedDataset;
 }
 
 impl DiscoveryNormalizer for Cube {
-    fn normalize(&self, query: &str) -> NormalizedDataset {
-        let score = crate::data_helpers::score_cube_title_match(&self.cube_title_en, query);
+    fn normalize(&self, query_lower: &str) -> NormalizedDataset {
+        let score = crate::data_helpers::score_cube_title_match(&self.cube_title_en, query_lower);
         NormalizedDataset {
             id: self.product_id.clone(),
             title: self.cube_title_en.clone(),
@@ -161,8 +161,8 @@ impl DiscoveryNormalizer for Cube {
 }
 
 impl DiscoveryNormalizer for crate::PackageMetadata {
-    fn normalize(&self, query: &str) -> NormalizedDataset {
-        let score = strsim::jaro_winkler(&self.title.to_lowercase(), &query.to_lowercase()) + 1.0;
+    fn normalize(&self, query_lower: &str) -> NormalizedDataset {
+        let score = strsim::jaro_winkler(&self.title.to_lowercase(), query_lower) + 1.0;
         let best_resource_id =
             crate::data_helpers::select_best_resource(&self.resources).map(|r| r.id.clone());
         NormalizedDataset {
