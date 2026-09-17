@@ -550,7 +550,8 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
         let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
             .iter()
             .filter_map(|c| {
-                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
+                let score =
+                    crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
 
                 if score > 0.6 {
                     Some((c, score))
