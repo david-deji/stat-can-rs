@@ -214,6 +214,7 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
     let query = args["query"]
         .as_str()
         .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
+    let query_lower = query.to_lowercase();
     let resp = client.get_all_cubes_list_lite().await?;
 
     let all_cubes = resp.object.unwrap_or_default();
@@ -221,7 +222,7 @@ pub async fn handle_search_cubes<C: StatCanClientTrait>(
     let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
         .iter()
         .filter_map(|c| {
-            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+            let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
 
             // Only keep results with a reasonable score threshold
             if score > 0.6 {
@@ -477,6 +478,8 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
         .ok_or(JsonRpcError::new(-32602, "Missing query"))?;
     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
+    let query_lower = query.to_lowercase();
+
     let statcan_future = client.get_all_cubes_list_lite();
     let od_future = od_client.search_packages(query, limit);
 
@@ -488,7 +491,7 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
         let all_cubes = resp.object.unwrap_or_default();
         let scored_cubes: Vec<(crate::models::NormalizedDataset, f64)> = all_cubes
             .iter()
-            .map(|c| c.normalize(query))
+            .map(|c| c.normalize(&query_lower))
             .filter(|norm| norm.score > 0.6)
             .map(|norm| {
                 let s = norm.score;
@@ -503,7 +506,7 @@ pub async fn handle_discover_datasets<C: StatCanClientTrait, O: CKANClient>(
 
     if let Ok(packages) = od_res {
         let scored_packages: Vec<crate::models::NormalizedDataset> =
-            packages.iter().map(|p| p.normalize(query)).collect();
+            packages.iter().map(|p| p.normalize(&query_lower)).collect();
         unified_results.extend(scored_packages.into_iter().take(limit));
     }
 
@@ -547,7 +550,8 @@ pub async fn handle_search_all<C: StatCanClientTrait, O: CKANClient>(
         let mut scored_cubes: Vec<(&crate::models::Cube, f64)> = all_cubes
             .iter()
             .filter_map(|c| {
-                let score = crate::data_helpers::score_cube_title_match(&c.cube_title_en, query);
+                let score =
+                    crate::data_helpers::score_cube_title_match(&c.cube_title_en, &query_lower);
 
                 if score > 0.6 {
                     Some((c, score))
